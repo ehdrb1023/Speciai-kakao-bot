@@ -1,0 +1,458 @@
+/**
+ * 거래처 카톡 수집 봇 (메신저봇R · Android)
+ * ------------------------------------------------------------------
+ * 이 스크립트는 메신저봇R(Android) 앱에 등록해 업무 전용 단말에서 실행한다.
+ * 봇 계정을 거래처 단톡방에 초대하면, 그 방 메시지를 서버로 보낸다.
+ *
+ * ★ 이 봇은 어떤 경우에도 카톡방에 말하지 않는다. 읽어서 보내기만 한다.
+ *   자동응답이 없으므로 카카오의 자동화 탐지에 걸릴 여지도 그만큼 줄어든다.
+ *
+ * ★ 개인 카톡 보호 — 이것이 이 봇의 핵심이다.
+ *   서버(대시보드 "거래처" 탭)에 등록한 방 이름 규칙을 주기적으로 내려받아,
+ *   규칙에 걸리는 방만 서버로 전송한다. 규칙에 없는 방(개인 카톡·가족방·동창방)은
+ *   단말 밖으로 한 글자도 나가지 않는다.
+ *   규칙을 한 번도 못 받았으면 아무것도 보내지 않는다(fail-closed).
+ *   "전부 보내고 서버에서 거른다" 가 아니다 — 그러면 개인 대화가 서버에 도달한다.
+ *
+ * ★ 전제(반드시 확인): 각 거래처 방 참여자에게 "메시지가 자동 수집·저장된다"는 사실을
+ *   사전 고지·동의받을 것(개인정보보호법 §15). 동의 없는 방 수집 금지.
+ *
+ * 서버 배선:
+ *   GET  {RULES_ENDPOINT} 헤더 X-Ingest-Token: {TOKEN}
+ *        → { version, rules: [{ kind, pattern }] }
+ *   POST {ENDPOINT}       헤더 X-Ingest-Token: {TOKEN}
+ *        → { room, sender, text, chatId?, logId?, image?, imageName? }
+ *        ← { ok, inserted, skipped, unmatched? }
+ *
+ * 설치:
+ *   1) Play스토어 "메신저봇R" 설치 → 알림 접근 권한·배터리 최적화 해제 허용
+ *   2) 봇 새로 만들기 → 이 파일 내용 전체 붙여넣기(기존 코드 싹 지우고)
+ *   3) 아래 설정 3줄 채우기 → 컴파일 ON → 봇 계정으로 거래처 방 초대
+ *
+ * ※ API2(BotManager + Event.MESSAGE) 우선. v0.7.29a 이상에서 동작한다.
+ *   메신저봇R 은 알림 파싱 기반이라 단말에 따라 방 제목 대신 발신자명이 오는 경우가 있다.
+ *   그 상태로는 규칙 매칭이 불가능하므로 알림 원본(conversationTitle)에서 방 제목을 복원한다.
+ */
+
+// ── 설정 (여기 3줄만 채우면 됨) ────────────────────────────────
+//
+// ⚠️ TOKEN 을 채운 파일은 커밋하지 말 것. 이 파일은 플레이스홀더 상태로만 저장소에 둔다.
+//    값을 채워 보관하려면 bot/speciai-bot.local.js 로 복사해서 쓴다(.gitignore 처리됨).
+//    실제 단말에는 메신저봇R 앱에 직접 붙여넣으므로 저장소에 채운 사본을 둘 이유가 없다.
+var ENDPOINT = 'https://<배포도메인>/api/kakao/bot/ingest';
+var RULES_ENDPOINT = 'https://<배포도메인>/api/kakao/bot/rules';
+var TOKEN = '<KAKAO_INGEST_TOKEN>'; // 서버 env KAKAO_INGEST_TOKEN 과 같은 값
+
+// ── 동작 옵션 ─────────────────────────────────────────────────
+var HANDLE_GROUP_ONLY = false;      // true 면 단톡방만. 일부 단말이 단톡방을 1:1 로 넘겨 기본은 false.
+var SEND_TIMEOUT_MS = 8000;
+var RULES_REFRESH_MS = 10 * 60 * 1000;  // 규칙 갱신 주기(10분)
+var RULES_CACHE_FILE = 'sq-kakao-rules.json'; // 앱 재시작 후에도 규칙을 유지하기 위한 캐시
+
+function _now() { return java.lang.System.currentTimeMillis(); }
+
+// ── 규칙 (서버에서 내려받음) ──────────────────────────────────
+var _rules = [];          // [{ kind, pattern }]
+var _rulesVersion = '';
+var _rulesFetchedAt = 0;
+var _rulesEverLoaded = false;
+
+/** 방 이름 정규화 — 서버 src/server/kakao/rules.ts 의 normalizeRoomName 과 같아야 한다. */
+function normRoom(name) {
+  if (name === null || name === undefined) return '';
+  return String(name).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+}
+
+/**
+ * 규칙 1건 매칭 — 서버 ruleMatches 와 같은 결과를 내야 한다.
+ * 여기와 서버가 어긋나면 "단말은 보냈는데 서버가 버리는" 방이 생긴다.
+ */
+function ruleMatches(rule, roomName) {
+  var room = normRoom(roomName);
+  var pattern = normRoom(rule.pattern);
+  if (!room || !pattern) return false;
+
+  var r = room.toLowerCase();
+  var p = pattern.toLowerCase();
+
+  if (rule.kind === 'prefix') return r.indexOf(p) === 0;
+  if (rule.kind === 'exact') return r === p;
+  if (rule.kind === 'contains') return r.indexOf(p) >= 0;
+  if (rule.kind === 'regex') {
+    try { return new RegExp(pattern, 'i').test(room); } catch (e) { return false; }
+  }
+  return false;
+}
+
+/** 이 방을 서버로 보내도 되는가. 규칙이 하나도 없으면 무조건 false(fail-closed). */
+function isAllowedRoom(roomName) {
+  if (!_rules || _rules.length === 0) return false;
+  for (var i = 0; i < _rules.length; i++) {
+    if (ruleMatches(_rules[i], roomName)) return true;
+  }
+  return false;
+}
+
+function readCachedRules() {
+  try {
+    if (typeof FileStream === 'undefined') return;
+    var raw = FileStream.read(RULES_CACHE_FILE);
+    if (!raw) return;
+    var obj = JSON.parse(raw);
+    if (obj && obj.rules && obj.rules.length) {
+      _rules = obj.rules;
+      _rulesVersion = obj.version || '';
+      _rulesEverLoaded = true;
+      Log.i('kakao-bot: 캐시 규칙 ' + _rules.length + '건 로드 (v' + _rulesVersion + ')');
+    }
+  } catch (e) {
+    Log.e('kakao-bot: 규칙 캐시 읽기 실패 — ' + e);
+  }
+}
+
+function writeCachedRules() {
+  try {
+    if (typeof FileStream === 'undefined') return;
+    FileStream.write(RULES_CACHE_FILE, JSON.stringify({ version: _rulesVersion, rules: _rules }));
+  } catch (e) {
+    Log.e('kakao-bot: 규칙 캐시 쓰기 실패 — ' + e);
+  }
+}
+
+/**
+ * 서버에서 규칙을 받아온다. 실패해도 기존 규칙을 지우지 않는다 —
+ * 네트워크가 잠깐 끊겼다고 수집이 멈추면 그동안의 메시지를 통째로 잃는다.
+ */
+function refreshRules(force) {
+  var now = _now();
+  if (!force && _rulesFetchedAt && (now - _rulesFetchedAt) < RULES_REFRESH_MS) return;
+  _rulesFetchedAt = now;
+
+  var conn = null;
+  try {
+    var url = new java.net.URL(RULES_ENDPOINT);
+    conn = url.openConnection();
+    conn.setRequestMethod('GET');
+    conn.setConnectTimeout(SEND_TIMEOUT_MS);
+    conn.setReadTimeout(SEND_TIMEOUT_MS);
+    conn.setRequestProperty('X-Ingest-Token', TOKEN);
+
+    var code = conn.getResponseCode();
+    if (code !== 200) {
+      Log.e('kakao-bot: 규칙 조회 실패 code=' + code);
+      return;
+    }
+    var reader = new java.io.BufferedReader(
+      new java.io.InputStreamReader(conn.getInputStream(), 'UTF-8'));
+    var body = '';
+    var line;
+    while ((line = reader.readLine()) !== null) body += line;
+    reader.close();
+
+    var obj = JSON.parse(body);
+    if (!obj || !obj.rules) return;
+    if (obj.version && obj.version === _rulesVersion) {
+      _rulesEverLoaded = true;
+      return; // 내용이 그대로면 갈아끼우지 않는다.
+    }
+    _rules = obj.rules;
+    _rulesVersion = obj.version || '';
+    _rulesEverLoaded = true;
+    writeCachedRules();
+    Log.i('kakao-bot: 규칙 ' + _rules.length + '건 갱신 (v' + _rulesVersion + ')');
+  } catch (e) {
+    Log.e('kakao-bot: 규칙 조회 예외 — ' + e);
+  } finally {
+    if (conn !== null) { try { conn.disconnect(); } catch (e2) {} }
+  }
+}
+
+// ── 이미지 추출 ───────────────────────────────────────────────
+// 단말·API 버전마다 사진 base64 를 꺼내는 경로가 달라 순서대로 시도한다.
+function extractImage(chat, imageDB) {
+  var out = null;
+  function tryGet(fn) {
+    if (out) return;
+    try {
+      var v = fn();
+      if (v && String(v).length > 100) out = String(v);
+    } catch (e) {}
+  }
+  if (chat) {
+    tryGet(function () {
+      if (chat.image && chat.image.getBase64) return chat.image.getBase64();
+      return null;
+    });
+    tryGet(function () {
+      if (chat.getImage) {
+        var im = chat.getImage();
+        if (im && im.getBase64) return im.getBase64();
+      }
+      return null;
+    });
+  }
+  if (imageDB) {
+    tryGet(function () {
+      if (imageDB.getImageBase64) return imageDB.getImageBase64();
+      return null;
+    });
+    tryGet(function () {
+      if (imageDB.getImage) return imageDB.getImage();
+      return null;
+    });
+  }
+  return out;
+}
+
+// ── 전송 ──────────────────────────────────────────────────────
+function postMessage(room, sender, text, imageB64, chatId, logId) {
+  var obj = { room: room, sender: sender, text: text };
+  if (chatId) obj.chatId = String(chatId);
+  if (logId) obj.logId = String(logId);
+  if (imageB64) {
+    obj.image = imageB64;
+    obj.imageName = 'kakao-' + _now() + '.jpg';
+  }
+  var payload = JSON.stringify(obj);
+
+  // 순수 Java HttpURLConnection 사용(메신저봇R 에서 Jsoup 보다 안정적).
+  var conn = null;
+  try {
+    var url = new java.net.URL(ENDPOINT);
+    conn = url.openConnection();
+    conn.setRequestMethod('POST');
+    conn.setConnectTimeout(SEND_TIMEOUT_MS);
+    conn.setReadTimeout(SEND_TIMEOUT_MS);
+    conn.setDoOutput(true);
+    conn.setRequestProperty('Content-Type', 'application/json; charset=utf-8');
+    conn.setRequestProperty('X-Ingest-Token', TOKEN);
+
+    var os = conn.getOutputStream();
+    os.write(new java.lang.String(payload).getBytes('UTF-8'));
+    os.flush();
+    os.close();
+
+    var code = conn.getResponseCode();
+    var stream = (code >= 200 && code < 400) ? conn.getInputStream() : conn.getErrorStream();
+    var body = '';
+    if (stream !== null) {
+      var reader = new java.io.BufferedReader(new java.io.InputStreamReader(stream, 'UTF-8'));
+      var line;
+      while ((line = reader.readLine()) !== null) body += line;
+      reader.close();
+    }
+    Log.i('kakao-bot POST ' + code + ' ' + body);
+
+    // 서버가 미매칭이라고 답하면 단말 규칙이 낡은 것이다. 즉시 갱신해 다음부터 안 보낸다.
+    if (body && body.indexOf('"unmatched":true') >= 0) refreshRules(true);
+    return body;
+  } catch (e) {
+    Log.e('kakao-bot POST 예외: ' + e);
+    return null;
+  } finally {
+    if (conn !== null) { try { conn.disconnect(); } catch (e2) {} }
+  }
+}
+
+// ── 수집 본체 (구·신 API 공통) ────────────────────────────────
+function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId) {
+  if (HANDLE_GROUP_ONLY && !isGroupChat) return;
+
+  var hasText = msg && String(msg).replace(/^\s+|\s+$/g, '').length > 0;
+  if (!hasText && !imageB64) return; // 입장·퇴장 같은 시스템 메시지
+
+  refreshRules(false);
+
+  if (!_rulesEverLoaded) {
+    // 서버에 한 번도 닿지 못한 상태. 여기서 다 보내면 개인 카톡이 새어 나간다. 아무것도 안 보낸다.
+    Log.e('kakao-bot: 규칙 미수신 — 전송 보류 room="' + room + '"');
+    return;
+  }
+
+  if (!isAllowedRoom(room)) {
+    // 규칙에 없는 방 = 개인 카톡. 로그에도 방 이름만 남기고 본문은 남기지 않는다.
+    Log.i('kakao-bot: 규칙 밖 방 스킵 room="' + room + '"');
+    return;
+  }
+
+  postMessage(room, sender, hasText ? String(msg) : '', imageB64, chatId, logId);
+}
+
+// ── 알림에서 진짜 방 제목 확보 ────────────────────────────────
+// 카톡 알림(MessagingStyle)은 title 에 발신자명을, conversationTitle/subText 에 방 제목을 넣는다.
+// 메신저봇R 이 title 만 읽어 room 으로 넘기는 단말이 있어, 그 경우 단톡방인데도 말한 사람마다
+// room 이 달라진다. 그 상태로는 접두어 규칙이 걸릴 수 없으므로 알림 원본에서 방 제목을 복원한다.
+var _notiBySender = {};
+var _notiLast = null;
+var _notiOk = false;
+var NOTI_TTL_MS = 15000;
+
+function _rememberNoti(sender, room, text) {
+  var prev = sender ? _notiBySender[String(sender)] : null;
+  var rec = {
+    room: room || (prev ? prev.room : ''),
+    text: (text !== null && text !== undefined && String(text).length > 0)
+      ? String(text)
+      : (prev ? prev.text : ''),
+    at: _now(),
+  };
+  if (sender) _notiBySender[String(sender)] = rec;
+  _notiLast = rec;
+}
+
+function _lookupNotiRoom(sender) {
+  var now = _now();
+  if (sender) {
+    var r = _notiBySender[String(sender)];
+    if (r && r.room && (now - r.at) < NOTI_TTL_MS) return r.room;
+  }
+  // 직전 알림이 아주 최근(1.5초 이내)이면 그 방으로 본다.
+  if (_notiLast && _notiLast.room && (now - _notiLast.at) < 1500) return _notiLast.room;
+  return null;
+}
+
+/** 발신자의 최근 알림 본문 전문(bigText). 긴 메시지 잘림 복원용. */
+function _lookupNotiText(sender) {
+  var now = _now();
+  if (sender) {
+    var r = _notiBySender[String(sender)];
+    if (r && r.text && (now - r.at) < NOTI_TTL_MS) return r.text;
+  }
+  if (_notiLast && _notiLast.text && (now - _notiLast.at) < 1500) return _notiLast.text;
+  return '';
+}
+
+// ── 진입점: API2 (권장) ───────────────────────────────────────
+var _api2 = false;      // 리스너 등록 성공 여부
+var _api2Fired = false; // API2 로 메시지를 실제로 1건이라도 받았는지
+var _bot = null;
+
+readCachedRules();
+refreshRules(true);
+
+try {
+  if (typeof BotManager !== 'undefined' && BotManager.getCurrentBot) {
+    _bot = BotManager.getCurrentBot();
+    if (_bot && _bot.on) {
+      _bot.on(Event.MESSAGE, function (chat) {
+        try {
+          _api2Fired = true;
+
+          // chat.room 은 단말/버전에 따라 객체(.name/.chatId)일 수도, 문자열일 수도 있다.
+          var rname = '';
+          var chId = null;
+          var grp = false;
+          try {
+            var rm = chat.room;
+            if (rm !== null && rm !== undefined) {
+              if (typeof rm === 'string') {
+                rname = rm;
+              } else {
+                if (rm.name) rname = String(rm.name);
+                if (rm.chatId !== undefined && rm.chatId !== null) chId = String(rm.chatId);
+                if (rm.isGroupChat) grp = true;
+              }
+            }
+          } catch (eR) {}
+
+          try { if (!chId && chat.channelId !== undefined && chat.channelId !== null) chId = String(chat.channelId); } catch (e1) {}
+          try { if (!chId && chat.chatId !== undefined && chat.chatId !== null) chId = String(chat.chatId); } catch (e2) {}
+          try { if (!rname && chat.roomName) rname = String(chat.roomName); } catch (e3) {}
+          try { if (!grp && chat.isGroupChat) grp = true; } catch (e4) {}
+
+          var logId = null;
+          try { if (chat.logId !== undefined && chat.logId !== null) logId = String(chat.logId); } catch (e5) {}
+
+          var sname = '';
+          try {
+            if (chat.author && chat.author.name) sname = String(chat.author.name);
+            else if (chat.sender) sname = String(chat.sender);
+          } catch (e6) {}
+
+          var ctext = '';
+          try {
+            if (chat.content !== undefined && chat.content !== null) ctext = String(chat.content);
+            else if (chat.message !== undefined && chat.message !== null) ctext = String(chat.message);
+          } catch (e7) {}
+
+          // 긴 메시지 잘림 복원: 카톡이 긴 메시지를 채팅DB에 "펼쳐보기" 축약으로 넣으면 ctext 가
+          // 잘린다. 같은 발신자의 최근 알림 bigText(전문)가 더 길면 그걸로 대체한다.
+          try {
+            var full = _lookupNotiText(sname);
+            if (full && full.length > ctext.length) {
+              if (ctext.length < 40 || full.indexOf(ctext.slice(0, 20)) >= 0) ctext = full;
+            }
+          } catch (e8) {}
+
+          // room 이 발신자명이면(단톡방인데 방 제목을 못 읽은 것) 알림에서 찾은 진짜 방 제목으로
+          // 교정한다. 접두어 규칙이 걸리려면 방 제목이 정확해야 한다.
+          try {
+            var realRoom = _lookupNotiRoom(sname);
+            if (realRoom) {
+              if (rname === sname || !rname) grp = true;
+              rname = realRoom;
+            } else if (rname === sname) {
+              // 방 제목 복원 실패 — 이 상태로는 규칙이 걸리지 않아 전송되지 않는다.
+              // 카톡에서 방 제목을 지정하면 해결된다.
+              Log.e('kakao-bot: 방제목 복원 실패 sender=' + sname + ' notiOk=' + _notiOk);
+            }
+          } catch (e9) {}
+
+          handleMessage(rname, ctext, sname, grp, extractImage(chat, null), chId, logId);
+        } catch (eMain) {
+          Log.e('kakao-bot[API2] 처리 예외: ' + eMain);
+        }
+      });
+      _api2 = true;
+      Log.i('kakao-bot: API2 리스너 등록 성공');
+    }
+  }
+  if (!_api2) Log.e('kakao-bot: API2 미활성 — 구 API 로 동작');
+} catch (e) {
+  Log.e('kakao-bot: API2 초기화 예외, 구 API 로 동작 — ' + e);
+}
+
+if (_api2) {
+  try {
+    _bot.on(Event.NOTIFICATION_POSTED, function (sbn) {
+      try {
+        var pkg = '';
+        try { pkg = String(sbn.getPackageName()); } catch (ep) {}
+        if (pkg.indexOf('kakao') < 0) return;
+
+        var ex = sbn.getNotification().extras;
+        function gs(key) {
+          try {
+            var v = ex.get(key);
+            if (v === null || v === undefined) return '';
+            return String(v);
+          } catch (e) { return ''; }
+        }
+        var ntitle = gs('android.title'); // 발신자명
+        var convo = gs('android.conversationTitle');
+        var sub = gs('android.subText');
+        var notiBody = gs('android.bigText') || gs('android.text');
+
+        var realRoom = convo || sub;
+        // 방 제목이 발신자명과 같으면 방 이름으로 저장하지 않는다(그건 방 제목이 아니다).
+        // 본문 전문은 잘림 복원에 쓰이므로 그래도 남긴다.
+        _rememberNoti(ntitle, (realRoom && realRoom !== ntitle) ? realRoom : '', notiBody);
+      } catch (eN) {
+        Log.e('kakao-bot[NOTI] 파싱 예외: ' + eN);
+      }
+    });
+    _notiOk = true;
+    Log.i('kakao-bot: 알림 기반 방 제목 확보 활성');
+  } catch (e) {
+    Log.e('kakao-bot: NOTIFICATION_POSTED 등록 실패 — ' + e);
+  }
+}
+
+// ── 진입점: 구 API (폴백) ─────────────────────────────────────
+// API2 가 실제로 메시지를 받은 적이 있으면 쓰지 않는다(중복 수집 방지).
+// 리스너 등록만 되고 이벤트가 안 오는 단말에서 둘 다 죽는 것을 막기 위해 _api2 가 아니라
+// _api2Fired 를 기준으로 판단한다.
+function response(room, msg, sender, isGroupChat, replier, imageDB, packageName) {
+  if (_api2Fired) return;
+  handleMessage(room, msg, sender, isGroupChat, extractImage(null, imageDB), null, null);
+}

@@ -1,0 +1,43 @@
+# ── 의존성·빌드 산출물 ────────────────────────────────────────
+node_modules/
+.next/
+out/
+build/
+coverage/
+*.tsbuildinfo
+
+# ── 환경변수 (절대 커밋 금지) ─────────────────────────────────
+# .env.example 만 커밋한다 — 키 없이 항목만 적힌 파일.
+.env
+.env.*
+!.env.example
+
+# ── 배포 도구 ─────────────────────────────────────────────────
+.vercel
+.netlify
+
+# ── Supabase CLI 로컬 상태 ────────────────────────────────────
+# .temp 에는 링크된 프로젝트 ref·pooler URL 등 배포 식별 정보가 들어간다.
+supabase/.temp/
+supabase/.branches/
+supabase/.env
+supabase/.env.keys
+
+# ── 봇 스크립트 로컬 사본 ─────────────────────────────────────
+# bot/speciai-bot.js 는 TOKEN 자리가 플레이스홀더인 상태로만 커밋한다.
+# 실제 토큰을 채운 사본은 아래 이름으로 두면 커밋되지 않는다.
+bot/*.local.js
+bot/*.secret.js
+
+# ── 로그·임시 ─────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-error.log*
+.cache/
+
+# ── 에디터·OS ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo

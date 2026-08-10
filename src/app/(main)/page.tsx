@@ -1,0 +1,190 @@
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+import dynamic from 'next/dynamic';
+import { getSession, createSupabaseServerClient } from '@/lib/auth/server';
+import { canManageMembers } from '@/lib/auth';
+import { BRAND } from '@/lib/brand';
+import { MembersPanel, type MemberRow, type InvitationRow } from '@/lib/ui';
+import { listRooms, listRoomMessages, listUnmatchedRooms } from '@/server/kakao';
+import { ConsoleShell } from '@/components/console/ConsoleShell';
+import { InboxView, type InboxViewData } from '@/components/console/views/InboxView';
+import {
+  listPartners,
+  createPartner,
+  deletePartner,
+  upsertRule,
+  deleteRule,
+  adoptUnmatchedRoom,
+  dismissUnmatchedRoom,
+  testRoomName,
+} from '@/server/actions/partners';
+import { invite, changeRole, removeMember, cancelInvite } from '@/server/actions/members';
+import { saveStaffAliases } from '@/server/actions/workspace';
+
+// 받은 카톡만 static(기본 탭). 나머지는 탭별 코드분할 — 초기 청크에서 분리한다.
+const PartnersView = dynamic(() =>
+  import('@/components/console/views/PartnersView').then((m) => m.PartnersView),
+);
+const LinkView = dynamic(() => import('@/components/console/views/LinkView').then((m) => m.LinkView));
+const StaffAliasesPanel = dynamic(() =>
+  import('@/components/StaffAliasesPanel').then((m) => m.StaffAliasesPanel),
+);
+
+export default async function Page() {
+  // layout 과 같은 폴백 — layout·page 는 병렬 렌더라 여기에도 있어야 확실히 미리보기로 간다.
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NODE_ENV !== 'production') {
+    redirect('/preview');
+  }
+  const session = await getSession(await cookies());
+  if (!session) redirect('/auth/sign-in');
+  if (!session.workspaceId) redirect('/onboarding');
+  const workspaceId = session.workspaceId;
+
+  const cookieStore = await cookies();
+  const sb = createSupabaseServerClient(cookieStore);
+  const canEdit = canManageMembers(session.role);
+
+  // 서로 의존성 없는 항목을 단일 Promise.all 로 병렬 로드.
+  const [{ data: ws }, rooms, unmatched, partners, messageCountRes, memberRes, inviteRes] =
+    await Promise.all([
+      sb.from('workspaces').select('name, staff_aliases').eq('id', workspaceId).single(),
+      listRooms(sb, workspaceId),
+      listUnmatchedRooms(sb, workspaceId),
+      listPartners(),
+      sb
+        .from('kakao_messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('workspace_id', workspaceId),
+      sb
+        .from('memberships')
+        .select('user_id, role, joined_at, profiles:profiles!memberships_user_id_fkey(email, display_name)')
+        .eq('workspace_id', workspaceId)
+        .order('joined_at', { ascending: true }),
+      sb
+        .from('invitations')
+        .select('id, email, role, expires_at, created_at')
+        .eq('workspace_id', workspaceId)
+        .is('accepted_at', null)
+        .order('created_at', { ascending: false }),
+    ]);
+
+  // 첫 방의 대화만 미리 싣는다. 나머지는 클릭 시 /api/kakao/thread 로 지연 로드.
+  const messagesByRoom: InboxViewData['messagesByRoom'] = {};
+  const firstRoom = rooms[0];
+  if (firstRoom) {
+    messagesByRoom[firstRoom.id] = await listRoomMessages(sb, workspaceId, firstRoom.id);
+  }
+
+  const staffAliases = Array.isArray(ws?.staff_aliases)
+    ? (ws.staff_aliases as unknown[]).filter((v): v is string => typeof v === 'string')
+    : [];
+
+  const inboxData: InboxViewData = {
+    rooms: rooms.map((r) => ({
+      id: r.id,
+      roomName: r.roomName,
+      partnerId: r.partnerId,
+      partnerName: r.partnerName,
+      color: r.color,
+      pinned: r.pinned,
+      handled: r.handled,
+      lastMessageAt: r.lastMessageAt,
+      preview: r.preview,
+      messageCount: r.messageCount,
+    })),
+    messagesByRoom,
+    staffLabel: BRAND.staffLabel,
+    unmatchedCount: unmatched.length,
+  };
+
+  const ruleCount = partners.reduce((sum, p) => sum + p.rules.filter((r) => r.enabled).length, 0);
+  const unhandled = rooms.filter((r) => !r.handled).length;
+
+  const roleLabel =
+    session.role === 'owner' ? '대표 · 소유자' : session.role === 'admin' ? '관리자' : '열람';
+
+  const members: MemberRow[] = (memberRes.data ?? []).map((m: any) => ({
+    userId: m.user_id,
+    email: m.profiles?.email ?? '',
+    displayName: m.profiles?.display_name ?? null,
+    role: m.role,
+    joinedAt: m.joined_at,
+    isSelf: m.user_id === session.userId,
+  }));
+  const invitations: InvitationRow[] = (inviteRes.data ?? []).map((i) => ({
+    id: i.id,
+    email: i.email,
+    role: i.role,
+    expiresAt: i.expires_at,
+    createdAt: i.created_at,
+  }));
+
+  return (
+    <ConsoleShell
+      brandName={BRAND.name}
+      brandMark={BRAND.mark}
+      brandSub={ws?.name ?? '업무 콘솔'}
+      userName={session.displayName ?? session.email}
+      userRole={roleLabel}
+      badges={{ kakao: unhandled }}
+      isAdmin={canEdit}
+      slots={{
+        kakao: <InboxView data={inboxData} />,
+        partners: (
+          <PartnersView
+            partners={partners}
+            unmatched={unmatched.map((u) => ({
+              id: u.id,
+              roomName: u.roomName,
+              hitCount: u.hitCount,
+              lastSeenAt: u.lastSeenAt,
+            }))}
+            canEdit={canEdit}
+            actions={{
+              createPartner,
+              deletePartner,
+              upsertRule,
+              deleteRule,
+              adoptUnmatchedRoom,
+              dismissUnmatchedRoom,
+              testRoomName,
+            }}
+          />
+        ),
+        link: (
+          <LinkView
+            status={{
+              // 토큰 실제 값은 클라이언트로 내리지 않는다. 설정 여부만 전달.
+              ingestTokenConfigured: !!process.env.KAKAO_INGEST_TOKEN,
+              workspaceIdConfigured: !!process.env.KAKAO_WORKSPACE_ID,
+              appUrl: process.env.NEXT_PUBLIC_APP_URL ?? '',
+              ruleCount,
+              roomCount: rooms.length,
+              messageCount: messageCountRes.count ?? 0,
+              lastIngestAt: rooms[0]?.lastMessageAt ?? null,
+            }}
+          />
+        ),
+        settings: (
+          <>
+            <StaffAliasesPanel
+              aliases={staffAliases}
+              canEdit={canEdit}
+              saveAction={saveStaffAliases}
+            />
+            <MembersPanel
+              workspaceName={ws?.name ?? '워크스페이스'}
+              canManage={canEdit}
+              members={members}
+              invitations={invitations}
+              inviteAction={invite}
+              changeRoleAction={changeRole}
+              removeMemberAction={removeMember}
+              cancelInviteAction={cancelInvite}
+            />
+          </>
+        ),
+      }}
+    />
+  );
+}
