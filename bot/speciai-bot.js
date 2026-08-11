@@ -225,6 +225,8 @@ function refreshRules(force) {
 //
 // 그래서 어느 경로가 무엇을 주는지 로그로 남긴다. 없는 경로인지, 있는데 null 인지,
 // 있는데 예외가 나는지가 구분되지 않으면 고칠 수 있는지조차 알 수 없다.
+var _lastImgTried = '';  // 마지막 사진 추출 시도 내역(경로별 결과). 최종 실패 로그에만 쓴다.
+
 function extractImage(chat, imageDB, bodyLooksLikePhoto) {
   var out = null;
   var tried = [];
@@ -263,12 +265,17 @@ function extractImage(chat, imageDB, bodyLooksLikePhoto) {
     });
   }
 
-  // 사진 메시지인데 못 꺼냈을 때만 남긴다. 평소 텍스트마다 찍으면 로그가 묻힌다.
-  if (!out && bodyLooksLikePhoto) {
-    Log.e('kakao-bot 사진 추출 실패 — imageDB=' + (imageDB ? '있음' : '없음')
-      + ' 시도[' + (tried.length ? tried.join(' ') : '경로없음') + ']');
-  }
+  // 진단 문구만 남겨두고 여기서 로그를 찍지는 않는다. 실측 결과 이 경로들은 이 단말에서
+  // 전부 빈 값을 주고(imageDB.getImageBase64=0), 실제 사진은 알림 폴백이 가져온다.
+  // 여기서 "실패" 를 찍으면 성공한 케이스마다 오해를 부르는 에러 로그가 남는다.
+  _lastImgTried = 'imageDB=' + (imageDB ? '있음' : '없음')
+    + ' [' + (tried.length ? tried.join(' ') : '경로없음') + ']';
   return out;
+}
+
+/** 사진을 결국 못 구했을 때만 한 번 남긴다. 두 경로(메신저봇R·알림)를 다 거친 뒤 부른다. */
+function logPhotoMiss(where) {
+  Log.e('kakao-bot[' + where + '] 사진 최종 실패 — ' + _lastImgTried + ' + 알림폴백 없음');
 }
 
 /** 본문이 카톡의 사진 알림 문구인가. 추출 실패 진단을 사진일 때만 찍기 위한 판정. */
@@ -283,12 +290,14 @@ function looksLikePhoto(text) {
 // 서버가 못 받은 메시지를 여기 쌓아두고 다음 기회에 다시 보낸다. 이게 없으면 폰 네트워크가
 // 잠깐 끊긴 것만으로 거래처 발주 내용이 영구히 사라지고, 사라졌다는 사실조차 남지 않는다.
 //
-// 파일에 쌓는 것이 원칙이다(앱 재시작을 견디려면). 다만 이 단말에서 FileStream.write 가
-// NPE 를 내는 것을 확인했으므로, 쓸 수 있는 경로를 시작할 때 찾아보고 하나도 없으면
-// 메모리 큐로 내려간다. 메모리 큐는 앱 재시작을 못 견디지만 네트워크 순간 단절 —
-// 실제로 가장 흔한 경우 — 은 막아준다. 아무것도 없는 것보다 훨씬 낫다.
-// 쓰기 가능 디렉터리 후보. 상대경로가 먼저다(되는 단말에서는 그게 정석 위치).
-var FILE_PREFIX_CANDIDATES = ['', '/sdcard/msgbot/', '/storage/emulated/0/msgbot/'];
+// 파일에 쌓는 것이 원칙이다 — 앱 재시작을 견뎌야 밤새 끊긴 경우를 복구할 수 있다.
+//
+// 실측: 이 단말은 FileStream 이 상대경로·/sdcard 어디에도 쓰지 못한다(NPE). Android 11+
+// 범위 지정 저장 때문에 외부 저장소는 권한 없이 못 쓴다. 그래서 **앱 전용 디렉터리**를
+// 첫 후보로 둔다 — getFilesDir() 은 어떤 권한도 없이 항상 쓸 수 있다.
+// 그리고 FileStream 이 실패하면 순수 Java IO 로 한 번 더 시도한다(NPE 가 FileStream 쪽
+// 구현 문제일 수 있어서다). 둘 다 안 되면 메모리 큐로 내려간다.
+var EXTRA_FILE_PREFIXES = ['', '/sdcard/msgbot/', '/storage/emulated/0/msgbot/'];
 var QUEUE_FILE = 'sq-kakao-queue.json';
 var PROBE_FILE = 'sq-kakao-probe.txt';
 /** 큐 상한. 넘으면 오래된 것부터 버린다 — 무한히 쌓여 폰을 채우는 쪽이 더 나쁘다. */
@@ -300,23 +309,80 @@ var _fileProbed = false;
 var _flushing = false;   // flushQueue 재진입 방지
 
 function fileWrite(path, text) {
+  if (path === null) return false;
   try {
-    if (typeof FileStream === 'undefined') return false;
-    FileStream.write(path, text);
-    return true;
-  } catch (e) {
-    return false;
-  }
+    if (typeof FileStream !== 'undefined') {
+      FileStream.write(path, text);
+      return true;
+    }
+  } catch (e) {}
+  return javaWrite(path, text);
 }
 
 function fileRead(path) {
+  if (path === null) return null;
   try {
-    if (typeof FileStream === 'undefined') return null;
-    var raw = FileStream.read(path);
-    return (raw === null || raw === undefined) ? null : String(raw);
+    if (typeof FileStream !== 'undefined') {
+      var raw = FileStream.read(path);
+      if (raw !== null && raw !== undefined) return String(raw);
+    }
+  } catch (e) {}
+  return javaRead(path);
+}
+
+function javaWrite(path, text) {
+  var out = null;
+  try {
+    var f = new java.io.File(path);
+    var parent = f.getParentFile();
+    if (parent !== null && !parent.exists()) parent.mkdirs();
+    out = new java.io.FileOutputStream(f);
+    out.write(new java.lang.String(text).getBytes('UTF-8'));
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    if (out !== null) { try { out.close(); } catch (e2) {} }
+  }
+}
+
+function javaRead(path) {
+  var reader = null;
+  try {
+    var f = new java.io.File(path);
+    if (!f.exists()) return null;
+    reader = new java.io.BufferedReader(
+      new java.io.InputStreamReader(new java.io.FileInputStream(f), 'UTF-8'));
+    var acc = '';
+    var line;
+    while ((line = reader.readLine()) !== null) acc += line;
+    return acc;
+  } catch (e) {
+    return null;
+  } finally {
+    if (reader !== null) { try { reader.close(); } catch (e2) {} }
+  }
+}
+
+/** 앱 전용 저장소. 권한이 필요 없고 다른 앱이 볼 수 없어 큐를 두기에 가장 적합하다. */
+function filesDirPrefix() {
+  try {
+    var ctx = appContext();
+    if (ctx === null) return null;
+    var dir = ctx.getFilesDir();
+    if (dir === null) return null;
+    return String(dir.getAbsolutePath()) + '/';
   } catch (e) {
     return null;
   }
+}
+
+function filePrefixCandidates() {
+  var list = [];
+  var priv = filesDirPrefix();
+  if (priv !== null) list.push(priv);
+  for (var i = 0; i < EXTRA_FILE_PREFIXES.length; i++) list.push(EXTRA_FILE_PREFIXES[i]);
+  return list;
 }
 
 /**
@@ -328,8 +394,9 @@ function fileRead(path) {
 function probeFilePrefix() {
   if (_fileProbed) return _filePrefix;
   _fileProbed = true;
-  for (var i = 0; i < FILE_PREFIX_CANDIDATES.length; i++) {
-    var prefix = FILE_PREFIX_CANDIDATES[i];
+  var candidates = filePrefixCandidates();
+  for (var i = 0; i < candidates.length; i++) {
+    var prefix = candidates[i];
     var probe = prefix + PROBE_FILE;
     var readBack = fileWrite(probe, 'ok') ? fileRead(probe) : null;
     if (readBack !== null && readBack.indexOf('ok') >= 0) {
@@ -847,9 +914,13 @@ try {
             }
           } catch (e9) {}
 
-          // 메신저봇R 이 이미지를 안 주면 알림에서 꺼내둔 것을 쓴다.
-          var img = extractImage(chat, null, looksLikePhoto(ctext));
-          if (!img && looksLikePhoto(ctext)) img = _takeNotiImage(sname);
+          // 메신저봇R 이 이미지를 안 주면 알림에서 꺼내둔 것을 쓴다(실측: 이 단말은 항상 이쪽).
+          var isPhoto = looksLikePhoto(ctext);
+          var img = extractImage(chat, null, isPhoto);
+          if (!img && isPhoto) {
+            img = _takeNotiImage(sname);
+            if (!img) logPhotoMiss('API2');
+          }
 
           handleMessage(rname, ctext, sname, grp, img, chId, logId);
         } catch (eMain) {
@@ -898,8 +969,12 @@ function response(room, msg, sender, isGroupChat, replier, imageDB, packageName)
     Log.e('kakao-bot[구API] 방제목 복원 실패 sender="' + sender + '" notiHook=' + _notiSeen);
   }
 
-  var img = extractImage(null, imageDB, looksLikePhoto(msg));
-  if (!img && looksLikePhoto(msg)) img = _takeNotiImage(sender);
+  var isPhoto = looksLikePhoto(msg);
+  var img = extractImage(null, imageDB, isPhoto);
+  if (!img && isPhoto) {
+    img = _takeNotiImage(sender);
+    if (!img) logPhotoMiss('구API');
+  }
 
   handleMessage(rname, msg, sender, grp, img, null, null);
 }
