@@ -5,6 +5,7 @@
 
 import { useState } from 'react';
 import { Ic } from '../IconDefs';
+import { seoulFull } from '@/lib/time';
 
 export interface LinkStatus {
   ingestTokenConfigured: boolean;
@@ -38,7 +39,7 @@ export function LinkView({ status }: { status: LinkStatus }) {
           연결된 방<b>{status.linkedRoomCount}</b>
         </div>
         <div className="smini">
-          마지막 수신<b>{status.lastIngestAt ? new Date(status.lastIngestAt).toLocaleString('ko-KR') : '없음'}</b>
+          마지막 수신<b>{status.lastIngestAt ? seoulFull(status.lastIngestAt) : '없음'}</b>
         </div>
       </div>
 

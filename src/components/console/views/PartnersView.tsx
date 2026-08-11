@@ -11,6 +11,7 @@ import { Ic } from '../IconDefs';
 import { EmptyState } from '../EmptyState';
 import type { PartnerRow, RuleRow, BoundRoomRow } from '@/server/actions/partners';
 import type { RoomRuleKind } from '@/server/kakao/rules';
+import { seoulMonthDayTime } from '@/lib/time';
 
 export interface UnmatchedRoom {
   id: string;
@@ -353,13 +354,7 @@ function UnmatchedRow({
       <span className="cm">
         <b>{room.roomName}</b>
         <span className="mt">
-          {room.hitCount}회 수신 · 마지막{' '}
-          {new Date(room.lastSeenAt).toLocaleString('ko-KR', {
-            month: 'numeric',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          })}
+          {room.hitCount}회 수신 · 마지막 {seoulMonthDayTime(room.lastSeenAt)}
         </span>
       </span>
       {canEdit ? (

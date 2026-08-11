@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { seoulDate } from '@/lib/time';
 
 export interface MemberRow {
   userId: string;
@@ -173,7 +174,7 @@ export function MembersPanel({
                 <div className="member-body">
                   <div className="member-name">{inv.email}</div>
                   <div className="member-email">
-                    {roleLabel[inv.role]} 권한 · {new Date(inv.expiresAt).toLocaleDateString('ko-KR')} 만료
+                    {roleLabel[inv.role]} 권한 · {seoulDate(inv.expiresAt)} 만료
                   </div>
                 </div>
                 {canManage && (

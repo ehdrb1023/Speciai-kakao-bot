@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Ic } from '../IconDefs';
 import { EmptyState } from '../EmptyState';
 import { navigateConsole } from '../nav';
+import { seoulClock, seoulDateKey, seoulDayLabel, seoulMonthDayTime } from '@/lib/time';
 
 export interface InboxRoom {
   id: string;
@@ -584,41 +585,37 @@ function renderMessages(messages: InboxMessage[], staffLabel: string) {
   return out;
 }
 
+// 아래 넷은 전부 서울 고정 포맷터를 쓴다. 로컬 타임존으로 렌더하면 서버(UTC)와 어긋나
+// 하이드레이션이 깨진다 — src/lib/time.ts 주석 참고.
+
 function dayKey(iso: string): string {
-  return iso.slice(0, 10);
+  return seoulDateKey(iso);
 }
 
 function dayLabel(iso: string): string {
-  const d = new Date(iso);
-  return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일`;
+  return seoulDayLabel(iso);
 }
 
 function clockTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+  return seoulClock(iso);
 }
 
 function fullTime(iso: string | null): string {
   if (!iso) return '기록 없음';
-  const d = new Date(iso);
-  return d.toLocaleString('ko-KR', {
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return seoulMonthDayTime(iso);
 }
 
-/** 목록용 짧은 시각 — 오늘이면 시:분, 아니면 월/일. */
+/**
+ * 목록용 짧은 시각 — 오늘이면 시:분, 아니면 월/일.
+ *
+ * "오늘" 판정에 현재 시각을 쓰므로 서버 렌더와 하이드레이션이 자정을 사이에 두고 갈리면
+ * 여전히 어긋난다. 하루에 한 번, 그것도 1초 미만의 창이라 감수한다 —
+ * 9시간씩 어긋나던 타임존 문제와 달리 실질적으로 발생하지 않는다.
+ */
 function shortTime(iso: string | null): string {
   if (!iso) return '';
-  const d = new Date(iso);
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  return sameDay
-    ? d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
-    : `${d.getMonth() + 1}/${d.getDate()}`;
+  const key = seoulDateKey(iso);
+  if (key === seoulDateKey(new Date())) return seoulClock(iso);
+  const [, m, d] = key.split('-');
+  return `${Number(m)}/${Number(d)}`;
 }
