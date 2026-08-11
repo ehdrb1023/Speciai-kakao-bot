@@ -8,26 +8,34 @@
  *   자동응답이 없으므로 카카오의 자동화 탐지에 걸릴 여지도 그만큼 줄어든다.
  *
  * ★ 개인 카톡 보호 — 이것이 이 봇의 핵심이다.
- *   서버(대시보드 "거래처" 탭)에 등록한 방 이름 규칙을 주기적으로 내려받아,
- *   규칙에 걸리는 방만 서버로 전송한다. 규칙에 없는 방(개인 카톡·가족방·동창방)은
- *   단말 밖으로 한 글자도 나가지 않는다.
+ *   서버에서 "연결된 방" 목록을 주기적으로 내려받아, 그 방만 서버로 전송한다.
+ *   목록에 없는 방(개인 카톡·가족방·동창방)은 단말 밖으로 한 글자도 나가지 않는다.
  *   규칙을 한 번도 못 받았으면 아무것도 보내지 않는다(fail-closed).
  *   "전부 보내고 서버에서 거른다" 가 아니다 — 그러면 개인 대화가 서버에 도달한다.
+ *   유일한 예외는 등록 명령 두 종류다(아래).
+ *
+ * ★ 방 등록 — 카톡방 안에서 켜고 끈다.
+ *     #등록 삼성전자   이 방을 그 거래처에 붙인다. 이후 대화가 수집된다.
+ *                    거래처는 대시보드에 미리 등록돼 있어야 한다 — 없으면 거부된다.
+ *     #등록해제        이 방의 수집을 멈춘다. 이미 저장된 대화는 지워지지 않는다.
+ *   이 두 메시지만 규칙 밖 방에서도 서버로 올라간다. 서버는 저장하지 않고 규칙만 고친다.
+ *   카톡에서 방 제목을 지정해 두어야 한다 — 제목이 없으면 등록이 거부된다.
  *
  * ★ 전제(반드시 확인): 각 거래처 방 참여자에게 "메시지가 자동 수집·저장된다"는 사실을
  *   사전 고지·동의받을 것(개인정보보호법 §15). 동의 없는 방 수집 금지.
  *
  * 서버 배선:
  *   GET  {RULES_ENDPOINT} 헤더 X-Ingest-Token: {TOKEN}
- *        → { version, rules: [{ kind, pattern }] }
+ *        → { version, rules: [{ kind, pattern }] }  연결된 방 목록
  *   POST {ENDPOINT}       헤더 X-Ingest-Token: {TOKEN}
  *        → { room, sender, text, chatId?, logId?, image?, imageName? }
- *        ← { ok, inserted, skipped, unmatched? }
+ *        ← { ok, inserted, skipped, unmatched?, registered?, unregistered? }
+ *          registered/unregistered 가 오면 규칙을 즉시 다시 받아온다.
  *
  * 설치:
  *   1) Play스토어 "메신저봇R" 설치 → 알림 접근 권한·배터리 최적화 해제 허용
  *   2) 봇 새로 만들기 → 이 파일 내용 전체 붙여넣기(기존 코드 싹 지우고)
- *   3) 아래 설정 3줄 채우기 → 컴파일 ON → 봇 계정으로 거래처 방 초대
+ *   3) 아래 설정 3줄 채우기 → 컴파일 ON → 봇 계정으로 거래처 방 초대 → 방에서 #등록
  *
  * ※ API2(BotManager + Event.MESSAGE) 우선. v0.7.29a 이상에서 동작한다.
  *   메신저봇R 은 알림 파싱 기반이라 단말에 따라 방 제목 대신 발신자명이 오는 경우가 있다.
@@ -56,6 +64,11 @@ var _rules = [];          // [{ kind, pattern }]
 var _rulesVersion = '';
 var _rulesFetchedAt = 0;
 var _rulesEverLoaded = false;
+
+function trimText(msg) {
+  if (msg === null || msg === undefined) return '';
+  return String(msg).replace(/^\s+|\s+$/g, '');
+}
 
 /** 방 이름 정규화 — 서버 src/server/kakao/rules.ts 의 normalizeRoomName 과 같아야 한다. */
 function normRoom(name) {
@@ -91,6 +104,20 @@ function isAllowedRoom(roomName) {
     if (ruleMatches(_rules[i], roomName)) return true;
   }
   return false;
+}
+
+/**
+ * 방 등록 명령인가. 서버 src/server/kakao/commands.ts 의 parseRoomCommand 와 같은 결과를 내야 한다.
+ * 어긋나면 단말이 통과시킨 명령을 서버가 일반 메시지로 저장해버린다.
+ *
+ * 규칙 밖 방에서 단말 밖으로 나가는 것은 이 두 종류뿐이다. 조건을 넓히지 말 것 —
+ * 넓히는 순간 개인 카톡이 서버에 도달한다.
+ */
+function isRoomCommand(text) {
+  if (!text) return false;
+  var t = String(text).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+  if (t === '#등록해제') return true;
+  return /^#등록\s+.+$/.test(t);
 }
 
 function readCachedRules() {
@@ -245,6 +272,10 @@ function postMessage(room, sender, text, imageB64, chatId, logId) {
 
     // 서버가 미매칭이라고 답하면 단말 규칙이 낡은 것이다. 즉시 갱신해 다음부터 안 보낸다.
     if (body && body.indexOf('"unmatched":true') >= 0) refreshRules(true);
+    // 등록·해제 직후에도 즉시 갱신한다. 안 하면 등록해도 최대 10분간 수집이 시작되지 않고,
+    // 해제해도 그동안 계속 올라간다.
+    if (body && body.indexOf('"registered":true') >= 0) refreshRules(true);
+    if (body && body.indexOf('"unregistered":true') >= 0) refreshRules(true);
     return body;
   } catch (e) {
     Log.e('kakao-bot POST 예외: ' + e);
@@ -258,7 +289,8 @@ function postMessage(room, sender, text, imageB64, chatId, logId) {
 function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId) {
   if (HANDLE_GROUP_ONLY && !isGroupChat) return;
 
-  var hasText = msg && String(msg).replace(/^\s+|\s+$/g, '').length > 0;
+  var text = trimText(msg);
+  var hasText = text.length > 0;
   if (!hasText && !imageB64) return; // 입장·퇴장 같은 시스템 메시지
 
   refreshRules(false);
@@ -269,13 +301,18 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId) 
     return;
   }
 
-  if (!isAllowedRoom(room)) {
+  // 규칙 밖 방이어도 등록 명령 한 종류만은 올려보낸다. 그러지 않으면 아직 등록되지 않은
+  // 방에서 "#등록" 을 쳐도 단말이 먼저 버려 영원히 등록할 수 없다.
+  var cmd = isRoomCommand(text);
+
+  if (!isAllowedRoom(room) && !cmd) {
     // 규칙에 없는 방 = 개인 카톡. 로그에도 방 이름만 남기고 본문은 남기지 않는다.
     Log.i('kakao-bot: 규칙 밖 방 스킵 room="' + room + '"');
     return;
   }
 
-  postMessage(room, sender, hasText ? String(msg) : '', imageB64, chatId, logId);
+  // 명령은 사진을 함께 올리지 않는다 — 서버가 저장하지 않고 버리므로 보낼 이유가 없다.
+  postMessage(room, sender, text, cmd ? null : imageB64, chatId, logId);
 }
 
 // ── 알림에서 진짜 방 제목 확보 ────────────────────────────────
@@ -322,15 +359,63 @@ function _lookupNotiText(sender) {
   return '';
 }
 
-// ── 진입점: API2 (권장) ───────────────────────────────────────
+// ── 알림 파싱 (API2·구 API 공통) ──────────────────────────────
+// 메신저봇R 은 알림의 android.title 만 읽어 room 으로 넘긴다. 단톡방에서 그 값은 발신자명이라
+// 접두어 규칙이 걸릴 수 없다. 여기서 알림 원본을 직접 읽어 진짜 방 제목을 기억해 둔다.
+// API2 는 Event.NOTIFICATION_POSTED 로, 구 API 는 전역 onNotificationPosted 로 들어온다.
 var _api2 = false;      // 리스너 등록 성공 여부
 var _api2Fired = false; // API2 로 메시지를 실제로 1건이라도 받았는지
+var _api2Why = '';      // API2 가 안 켜진 이유(진단용)
+var _notiSeen = false;  // 알림 훅이 한 번이라도 불렸는지 — 복원 실패 원인 구분용
 var _bot = null;
+
+function handleKakaoNoti(sbn) {
+  try {
+    var pkg = '';
+    try { pkg = String(sbn.getPackageName()); } catch (ep) {}
+    if (pkg.indexOf('kakao') < 0) return;
+
+    var ex = sbn.getNotification().extras;
+    function gs(key) {
+      try {
+        var v = ex.get(key);
+        if (v === null || v === undefined) return '';
+        return String(v);
+      } catch (e) { return ''; }
+    }
+    var ntitle = gs('android.title');            // 발신자명
+    var convo = gs('android.conversationTitle'); // 방 제목(카톡에서 이름을 지정한 방만)
+    var sub = gs('android.subText');             // 단말에 따라 여기에 방 제목이 온다
+    var notiBody = gs('android.bigText') || gs('android.text');
+
+    // 훅이 도는지 한 번만 남긴다. 본문은 남기지 않는다 — 개인 카톡이 로그에 쌓인다.
+    if (!_notiSeen) {
+      _notiSeen = true;
+      Log.i('kakao-bot[NOTI] 훅 동작 확인 title="' + ntitle + '" convo="' + convo + '" sub="' + sub + '"');
+    }
+
+    var realRoom = convo || sub;
+    // 방 제목이 발신자명과 같으면 방 이름으로 저장하지 않는다(그건 방 제목이 아니다).
+    // 본문 전문은 잘림 복원에 쓰이므로 그래도 남긴다.
+    _rememberNoti(ntitle, (realRoom && realRoom !== ntitle) ? realRoom : '', notiBody);
+  } catch (eN) {
+    Log.e('kakao-bot[NOTI] 파싱 예외: ' + eN);
+  }
+}
+
+// 구 API 전역 훅. 메신저봇R 이 지원하지 않는 버전이면 그냥 호출되지 않는다(무해).
+function onNotificationPosted(sbn) {
+  handleKakaoNoti(sbn);
+}
+
+// ── 진입점: API2 (권장) ───────────────────────────────────────
 
 readCachedRules();
 refreshRules(true);
 
 try {
+  _api2Why = 'BotManager=' + (typeof BotManager) + ' Event=' + (typeof Event);
+  Log.i('kakao-bot: ' + _api2Why);
   if (typeof BotManager !== 'undefined' && BotManager.getCurrentBot) {
     _bot = BotManager.getCurrentBot();
     if (_bot && _bot.on) {
@@ -414,35 +499,9 @@ try {
 
 if (_api2) {
   try {
-    _bot.on(Event.NOTIFICATION_POSTED, function (sbn) {
-      try {
-        var pkg = '';
-        try { pkg = String(sbn.getPackageName()); } catch (ep) {}
-        if (pkg.indexOf('kakao') < 0) return;
-
-        var ex = sbn.getNotification().extras;
-        function gs(key) {
-          try {
-            var v = ex.get(key);
-            if (v === null || v === undefined) return '';
-            return String(v);
-          } catch (e) { return ''; }
-        }
-        var ntitle = gs('android.title'); // 발신자명
-        var convo = gs('android.conversationTitle');
-        var sub = gs('android.subText');
-        var notiBody = gs('android.bigText') || gs('android.text');
-
-        var realRoom = convo || sub;
-        // 방 제목이 발신자명과 같으면 방 이름으로 저장하지 않는다(그건 방 제목이 아니다).
-        // 본문 전문은 잘림 복원에 쓰이므로 그래도 남긴다.
-        _rememberNoti(ntitle, (realRoom && realRoom !== ntitle) ? realRoom : '', notiBody);
-      } catch (eN) {
-        Log.e('kakao-bot[NOTI] 파싱 예외: ' + eN);
-      }
-    });
+    _bot.on(Event.NOTIFICATION_POSTED, handleKakaoNoti);
     _notiOk = true;
-    Log.i('kakao-bot: 알림 기반 방 제목 확보 활성');
+    Log.i('kakao-bot: 알림 기반 방 제목 확보 활성 (API2)');
   } catch (e) {
     Log.e('kakao-bot: NOTIFICATION_POSTED 등록 실패 — ' + e);
   }
@@ -452,7 +511,24 @@ if (_api2) {
 // API2 가 실제로 메시지를 받은 적이 있으면 쓰지 않는다(중복 수집 방지).
 // 리스너 등록만 되고 이벤트가 안 오는 단말에서 둘 다 죽는 것을 막기 위해 _api2 가 아니라
 // _api2Fired 를 기준으로 판단한다.
+//
+// 구 API 는 room 에 발신자명을 넣어 넘긴다(실측). API2 쪽과 같은 복원을 여기서도 한다 —
+// 이게 없으면 단톡방인데도 말하는 사람마다 room 이 달라져 규칙이 걸리지 않는다.
 function response(room, msg, sender, isGroupChat, replier, imageDB, packageName) {
   if (_api2Fired) return;
-  handleMessage(room, msg, sender, isGroupChat, extractImage(null, imageDB), null, null);
+
+  var rname = room;
+  var grp = isGroupChat;
+  var realRoom = _lookupNotiRoom(sender);
+  if (realRoom) {
+    rname = realRoom;
+    grp = true;
+  } else if (room === sender) {
+    // 복원 실패 — 이 상태로는 규칙이 걸리지 않아 전송되지 않는다.
+    // notiHook=false 면 이 단말이 onNotificationPosted 를 지원하지 않는 것이고,
+    // true 인데 실패면 그 방에 제목이 지정돼 있지 않은 것이다.
+    Log.e('kakao-bot[구API] 방제목 복원 실패 sender="' + sender + '" notiHook=' + _notiSeen);
+  }
+
+  handleMessage(rname, msg, sender, grp, extractImage(null, imageDB), null, null);
 }

@@ -10,14 +10,15 @@ export interface LinkStatus {
   ingestTokenConfigured: boolean;
   workspaceIdConfigured: boolean;
   appUrl: string;
-  ruleCount: number;
+  /** "#등록" 으로 거래처에 붙은 방 수. 0 이면 봇이 모든 방을 걸러낸다. */
+  linkedRoomCount: number;
   roomCount: number;
   messageCount: number;
   lastIngestAt: string | null;
 }
 
 export function LinkView({ status }: { status: LinkStatus }) {
-  const ready = status.ingestTokenConfigured && status.workspaceIdConfigured && status.ruleCount > 0;
+  const ready = status.ingestTokenConfigured && status.workspaceIdConfigured && status.linkedRoomCount > 0;
 
   return (
     <>
@@ -34,7 +35,7 @@ export function LinkView({ status }: { status: LinkStatus }) {
           메시지<b>{status.messageCount}</b>
         </div>
         <div className="smini">
-          활성 규칙<b>{status.ruleCount}</b>
+          연결된 방<b>{status.linkedRoomCount}</b>
         </div>
         <div className="smini">
           마지막 수신<b>{status.lastIngestAt ? new Date(status.lastIngestAt).toLocaleString('ko-KR') : '없음'}</b>
@@ -54,9 +55,9 @@ export function LinkView({ status }: { status: LinkStatus }) {
             hint="봇이 보낸 메시지를 어느 워크스페이스에 쌓을지"
           />
           <StatusLine
-            ok={status.ruleCount > 0}
-            label="거래처 방 규칙 등록"
-            hint="규칙이 0개면 봇이 모든 방을 걸러내 아무것도 수집되지 않습니다"
+            ok={status.linkedRoomCount > 0}
+            label="거래처 방 연결"
+            hint="연결된 방이 0개면 봇이 모든 방을 걸러내 아무것도 수집되지 않습니다"
           />
         </div>
         {!ready ? (
@@ -103,12 +104,12 @@ export function LinkView({ status }: { status: LinkStatus }) {
           <b>개인 카톡은 어떻게 걸러지나</b>
         </div>
         <div className="fhint" style={{ fontSize: 12.5, lineHeight: 1.8 }}>
-          봇은 <b>거래처 탭에 등록한 방 이름 규칙</b>을 10분마다 서버에서 내려받아 단말에 보관합니다. 규칙에
-          걸리지 않는 방(개인 카톡·가족방 등)은 <b>단말에서 차단되어 서버로 전송되지 않습니다.</b> 규칙을
+          봇은 <b>연결된 방 목록</b>을 10분마다 서버에서 내려받아 단말에 보관합니다. 목록에
+          없는 방(개인 카톡·가족방 등)은 <b>단말에서 차단되어 서버로 전송되지 않습니다.</b> 방을
           추가하면 다음 갱신 때 단말에 자동 반영되므로 단말을 다시 만질 필요가 없습니다.
           <br />
           <br />
-          단말이 서버에 한 번도 연결되지 못했다면 규칙이 비어 있어 <b>아무 방도 전송하지 않습니다</b>(모두
+          단말이 서버에 한 번도 연결되지 못했다면 목록이 비어 있어 <b>아무 방도 전송하지 않습니다</b>(모두
           전송하는 쪽이 아니라 아무것도 안 보내는 쪽으로 실패합니다).
         </div>
       </div>

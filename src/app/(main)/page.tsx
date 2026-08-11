@@ -12,11 +12,10 @@ import {
   listPartners,
   createPartner,
   deletePartner,
-  upsertRule,
-  deleteRule,
+  linkRoom,
+  unlinkRoom,
   adoptUnmatchedRoom,
   dismissUnmatchedRoom,
-  testRoomName,
 } from '@/server/actions/partners';
 import { invite, changeRole, removeMember, cancelInvite } from '@/server/actions/members';
 import { saveStaffAliases } from '@/server/actions/workspace';
@@ -97,7 +96,7 @@ export default async function Page() {
     unmatchedCount: unmatched.length,
   };
 
-  const ruleCount = partners.reduce((sum, p) => sum + p.rules.filter((r) => r.enabled).length, 0);
+  const linkedRoomCount = partners.reduce((sum, p) => sum + p.rooms.length, 0);
   const unhandled = rooms.filter((r) => !r.handled).length;
 
   const roleLabel =
@@ -143,11 +142,10 @@ export default async function Page() {
             actions={{
               createPartner,
               deletePartner,
-              upsertRule,
-              deleteRule,
+              linkRoom,
+              unlinkRoom,
               adoptUnmatchedRoom,
               dismissUnmatchedRoom,
-              testRoomName,
             }}
           />
         ),
@@ -158,7 +156,7 @@ export default async function Page() {
               ingestTokenConfigured: !!process.env.KAKAO_INGEST_TOKEN,
               workspaceIdConfigured: !!process.env.KAKAO_WORKSPACE_ID,
               appUrl: process.env.NEXT_PUBLIC_APP_URL ?? '',
-              ruleCount,
+              linkedRoomCount,
               roomCount: rooms.length,
               messageCount: messageCountRes.count ?? 0,
               lastIngestAt: rooms[0]?.lastMessageAt ?? null,

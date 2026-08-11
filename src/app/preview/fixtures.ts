@@ -180,9 +180,11 @@ export const PREVIEW_PARTNERS: PartnerRow[] = [
     color: 'blue',
     memo: null,
     roomCount: 2,
-    rules: [
-      { id: 'ru1', partnerId: 'p1', kind: 'prefix', pattern: '[삼성전자]', priority: 0, enabled: true },
+    rooms: [
+      { ruleId: 'ru1', roomName: '[삼성전자] 3분기 발주' },
+      { ruleId: 'ru2', roomName: '[삼성전자] 반도체 자재' },
     ],
+    legacyRules: [],
   },
   {
     id: 'p2',
@@ -190,8 +192,10 @@ export const PREVIEW_PARTNERS: PartnerRow[] = [
     color: 'green',
     memo: null,
     roomCount: 1,
-    rules: [
-      { id: 'ru2', partnerId: 'p2', kind: 'prefix', pattern: '[LG화학]', priority: 0, enabled: true },
+    rooms: [{ ruleId: 'ru3', roomName: 'LG화학 원료 문의' }],
+    // 패턴 방식이던 시절의 규칙이 남아 있는 케이스 — 화면에 어떻게 보이는지 확인용.
+    legacyRules: [
+      { id: 'ru4', partnerId: 'p2', kind: 'prefix', pattern: '[LG화학]', priority: 0, enabled: true },
     ],
   },
   {
@@ -200,8 +204,9 @@ export const PREVIEW_PARTNERS: PartnerRow[] = [
     color: null,
     memo: null,
     roomCount: 1,
-    // 규칙이 0개인 거래처 — 경고 문구가 어떻게 뜨는지 확인하기 위한 케이스.
-    rules: [],
+    // 연결된 방이 0개인 거래처 — 경고 문구가 어떻게 뜨는지 확인하기 위한 케이스.
+    rooms: [],
+    legacyRules: [],
   },
 ];
 

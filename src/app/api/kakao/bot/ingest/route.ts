@@ -2,11 +2,15 @@ import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getServerClient } from '@/lib/db';
 import {
+  bindRoomToPartner,
   ingestBotMessage,
   matchRoomForWorkspace,
+  normalizeRoomName,
+  parseRoomCommand,
   recordUnmatchedRoom,
   resolveBotWorkspaceId,
   roomKeyOf,
+  unbindRoom,
 } from '@/server/kakao';
 import { logAuditMachine } from '@/server/audit';
 import { ingestTokenValid } from '@/server/kakao/ingest-token';
@@ -22,6 +26,10 @@ import { ingestTokenValid } from '@/server/kakao/ingest-token';
 //   image    사진 메시지 base64(data: 접두어 없이). 텍스트 없이 사진만 있어도 받는다
 // 출력: { ok, inserted, skipped, unmatched? }
 //   unmatched=true 는 규칙 미매칭. 봇이 그 방을 로컬 차단 목록에 넣는 신호로도 쓴다.
+//
+// 방 등록 명령: text 가 "#등록 <거래처명>" · "#등록해제" 면 메시지가 아니라 명령으로 처리한다.
+//   저장하지 않고 exact 규칙을 만들거나 지운다. 응답의 registered/unregistered 를 보고
+//   봇이 규칙을 즉시 다시 받아가 등록 직후부터 수집이 시작된다.
 
 export async function POST(req: Request) {
   if (!ingestTokenValid(req)) {
@@ -55,6 +63,12 @@ export async function POST(req: Request) {
       { error: 'KAKAO_WORKSPACE_ID 가 설정되지 않았습니다' },
       { status: 503 },
     );
+  }
+
+  // 방 등록/해제 명령은 메시지가 아니다. 매칭·저장 어느 쪽도 타지 않고 여기서 끝난다.
+  const command = parseRoomCommand(body.text ?? '');
+  if (command) {
+    return handleRoomCommand(sb, workspaceId, command, body.room, body.sender);
   }
 
   // 매칭을 먼저 본다 — 미매칭 방의 사진이 버킷에 남으면 안 되기 때문.
@@ -95,6 +109,108 @@ export async function POST(req: Request) {
   });
 
   return NextResponse.json({ ok: true, inserted: result.inserted, skipped: result.skipped });
+}
+
+/**
+ * "#등록 <거래처명>" · "#등록해제" 처리.
+ *
+ * 봇은 이 두 메시지만 규칙 밖 방에서도 올려보낸다(bot/speciai-bot.js 의 isRoomCommand).
+ * 응답의 registered/unregistered 를 보고 봇이 규칙을 즉시 다시 받아간다 —
+ * 그래야 등록 직후부터 수집이 시작되고, 해제 직후부터 멈춘다(기본 갱신 주기 10분을 안 기다림).
+ */
+async function handleRoomCommand(
+  sb: SupabaseClient,
+  workspaceId: string,
+  command: NonNullable<ReturnType<typeof parseRoomCommand>>,
+  room: string,
+  sender: string,
+) {
+  // 방 제목이 없는 단말에서는 room 자리에 발신자명이 온다. 그 이름으로 규칙을 만들면
+  // 그 사람이 말하는 모든 방이 이 거래처로 붙어버린다. 등록·해제 모두 거부한다.
+  if (normalizeRoomName(room) === normalizeRoomName(sender)) {
+    await logAuditMachine({
+      action: 'kakao.bot.ingest',
+      targetTable: 'partner_room_rules',
+      meta: { room, command: command.kind, rejected: 'no-room-title' },
+    });
+    return NextResponse.json({
+      ok: true,
+      inserted: 0,
+      skipped: 0,
+      command: command.kind,
+      rejected: 'no-room-title',
+    });
+  }
+
+  if (command.kind === 'unbind') {
+    const result = await unbindRoom(sb, workspaceId, room);
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error ?? '해제 실패' }, { status: 500 });
+    }
+    await logAuditMachine({
+      action: 'kakao.bot.ingest',
+      targetTable: 'partner_room_rules',
+      meta: {
+        room,
+        sender,
+        command: 'unbind',
+        removed: result.removed,
+        stillMatched: result.stillMatched,
+      },
+    });
+    return NextResponse.json({
+      ok: true,
+      inserted: 0,
+      skipped: 0,
+      unregistered: true,
+      removed: result.removed,
+      stillMatched: result.stillMatched,
+    });
+  }
+
+  const result = await bindRoomToPartner(sb, workspaceId, room, command.partnerName);
+
+  // 대시보드에 없는 회사명 — 만들지 않는다. 방에서 친 오타로 거래처가 생기면 그 방 대화가
+  // 조용히 엉뚱한 곳에 쌓인다. 대신 미분류 방에 남겨 콘솔에서 눈에 띄게 한다.
+  if (result.partnerMissing) {
+    await recordUnmatchedRoom(sb, workspaceId, roomKeyOf(null, room), normalizeRoomName(room));
+    await logAuditMachine({
+      action: 'kakao.bot.ingest',
+      targetTable: 'partner_room_rules',
+      meta: { room, sender, command: 'bind', rejected: 'partner-missing', tried: command.partnerName },
+    });
+    return NextResponse.json({
+      ok: true,
+      inserted: 0,
+      skipped: 0,
+      command: 'bind',
+      rejected: 'partner-missing',
+    });
+  }
+
+  if (!result.ok) {
+    return NextResponse.json({ error: result.error ?? '등록 실패' }, { status: 500 });
+  }
+
+  await logAuditMachine({
+    action: 'kakao.bot.ingest',
+    targetTable: 'partner_room_rules',
+    targetId: result.partnerId,
+    meta: {
+      room,
+      sender,
+      command: 'bind',
+      partner: result.partnerName,
+      rebindedFrom: result.rebindedFrom,
+    },
+  });
+  return NextResponse.json({
+    ok: true,
+    inserted: 0,
+    skipped: 0,
+    registered: true,
+    partner: result.partnerName,
+  });
 }
 
 async function storeImage(

@@ -22,7 +22,6 @@ import {
   PREVIEW_STAFF_ALIASES,
   PREVIEW_UNMATCHED,
 } from './fixtures';
-import { matchRoomRule, type RoomRuleKind } from '@/server/kakao/rules';
 
 // 미리보기에서는 어떤 변경도 저장되지 않는다. 저장 버튼이 조용히 아무것도 안 하면
 // 고장으로 보이므로, 눌렀을 때 그 사실을 문구로 돌려준다.
@@ -33,8 +32,6 @@ async function noop() {
 
 export function PreviewConsole() {
   const [dismissed, setDismissed] = useState(false);
-
-  const rules = PREVIEW_PARTNERS.flatMap((p) => p.rules);
 
   return (
     <>
@@ -97,27 +94,10 @@ export function PreviewConsole() {
               actions={{
                 createPartner: noop,
                 deletePartner: noop,
-                upsertRule: noop,
-                deleteRule: noop,
+                linkRoom: noop,
+                unlinkRoom: noop,
                 adoptUnmatchedRoom: noop,
                 dismissUnmatchedRoom: noop,
-                // 규칙 시험만은 진짜로 동작시킨다 — 매칭 규칙이 어떻게 도는지가
-                // 이 앱에서 가장 먼저 확인하고 싶은 부분이라 목업으로 두면 볼 것이 없다.
-                testRoomName: async (roomName: string) => {
-                  const winner = matchRoomRule(roomName, rules);
-                  const partnerOf = (partnerId: string) =>
-                    PREVIEW_PARTNERS.find((p) => p.id === partnerId)?.name ?? '(이름 없음)';
-                  return {
-                    matchedPartner: winner ? partnerOf(winner.partnerId) : null,
-                    candidates: rules
-                      .filter((r) => matchRoomRule(roomName, [r]))
-                      .map((r) => ({
-                        partner: partnerOf(r.partnerId),
-                        kind: r.kind as RoomRuleKind,
-                        pattern: r.pattern,
-                      })),
-                  };
-                },
               }}
             />
           ),
@@ -127,7 +107,7 @@ export function PreviewConsole() {
                 ingestTokenConfigured: false,
                 workspaceIdConfigured: false,
                 appUrl: typeof window === 'undefined' ? '' : window.location.origin,
-                ruleCount: rules.length,
+                linkedRoomCount: PREVIEW_PARTNERS.reduce((sum, p) => sum + p.rooms.length, 0),
                 roomCount: PREVIEW_ROOMS.length,
                 messageCount: PREVIEW_ROOMS.reduce((sum, r) => sum + r.messageCount, 0),
                 lastIngestAt: PREVIEW_ROOMS[0]?.lastMessageAt ?? null,

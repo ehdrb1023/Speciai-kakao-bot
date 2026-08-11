@@ -1,12 +1,15 @@
 'use client';
 
-// 거래처 — 방 이름 규칙 등록이 이 앱의 핵심 설정 화면이다.
-// 여기서 등록한 규칙이 봇 단말로 내려가 개인 카톡을 걸러내고, 서버에서 거래처 매칭에 쓰인다.
+// 거래처 — 여기서는 회사명만 관리한다.
+//
+// 방↔거래처 연결은 카톡방 안에서 "#등록 <회사명>" 으로 만든다. 이 화면에서 방 이름 패턴을
+// 손으로 맞추게 하지 않는 이유: 대괄호 하나 빠진 규칙이 섞이면 그 방은 아무 소리 없이
+// 수집되지 않고, 몇 주 뒤에야 "왜 이 방만 안 들어오지" 로 발견된다.
 
 import { useState, useTransition } from 'react';
 import { Ic } from '../IconDefs';
 import { EmptyState } from '../EmptyState';
-import type { PartnerRow, RuleRow } from '@/server/actions/partners';
+import type { PartnerRow, RuleRow, BoundRoomRow } from '@/server/actions/partners';
 import type { RoomRuleKind } from '@/server/kakao/rules';
 
 export interface UnmatchedRoom {
@@ -17,26 +20,15 @@ export interface UnmatchedRoom {
 }
 
 export interface PartnersActions {
-  createPartner: (input: { name: string; pattern?: string; kind?: RoomRuleKind }) => Promise<{ error?: string }>;
+  createPartner: (input: { name: string }) => Promise<{ error?: string }>;
   deletePartner: (id: string) => Promise<{ error?: string }>;
-  upsertRule: (input: {
-    id?: string;
-    partnerId: string;
-    kind: RoomRuleKind;
-    pattern: string;
-  }) => Promise<{ error?: string }>;
-  deleteRule: (id: string) => Promise<{ error?: string }>;
+  linkRoom: (input: { partnerId: string; roomName: string }) => Promise<{ error?: string }>;
+  unlinkRoom: (ruleId: string) => Promise<{ error?: string }>;
   adoptUnmatchedRoom: (input: {
     unmatchedId: string;
     partnerId: string;
-    kind: RoomRuleKind;
-    pattern: string;
   }) => Promise<{ error?: string }>;
   dismissUnmatchedRoom: (id: string) => Promise<{ error?: string }>;
-  testRoomName: (roomName: string) => Promise<{
-    matchedPartner: string | null;
-    candidates: { partner: string; kind: RoomRuleKind; pattern: string }[];
-  }>;
 }
 
 const KIND_LABELS: Record<RoomRuleKind, string> = {
@@ -59,9 +51,7 @@ export function PartnersView({
 }) {
   const [msg, setMsg] = useState<string | null>(null);
   const [pending, start] = useTransition();
-
   const [newName, setNewName] = useState('');
-  const [newPattern, setNewPattern] = useState('');
 
   function run(fn: () => Promise<{ error?: string }>, okMsg: string) {
     start(async () => {
@@ -70,22 +60,12 @@ export function PartnersView({
     });
   }
 
-  // 거래처명을 치면 접두어를 "[이름]" 으로 자동 제안한다. 우리 방 이름 관행이 그 형태라서,
-  // 매번 대괄호를 직접 치게 하면 대괄호 빠뜨린 규칙이 섞인다.
-  function onNameChange(value: string) {
-    const suggested = `[${newName.trim()}]`;
-    setNewName(value);
-    if (!newPattern || newPattern === suggested) {
-      setNewPattern(value.trim() ? `[${value.trim()}]` : '');
-    }
-  }
-
   return (
     <>
       <div className="vhead">
         <h1>거래처</h1>
         <div className="sub">
-          방 이름 규칙을 등록하면 그 방만 수집합니다. 규칙에 없는 방은 봇 단말에서 걸러져 서버로 오지 않습니다.
+          여기에 회사명을 등록하고, 카톡방에서 <b>#등록 회사명</b> 을 한 번 치면 그 방부터 수집됩니다.
         </div>
       </div>
 
@@ -95,19 +75,19 @@ export function PartnersView({
         </div>
       ) : null}
 
-      {/* 규칙 시험 — 등록 전에 오타를 잡는다 */}
-      <RuleTester testRoomName={actions.testRoomName} />
+      <HowTo />
 
-      {/* 미분류 방 — 규칙 누락을 눈으로 잡는 자리 */}
+      {/* 미분류 방 — 아직 어느 거래처에도 안 붙은 방 */}
       {unmatched.length > 0 ? (
         <div className="card" style={{ marginBottom: 14 }}>
           <div className="sh" style={{ marginBottom: 10 }}>
             <Ic id="i-flag" w={15} />
-            <b>미분류 방 {unmatched.length}개</b>
+            <b>연결 안 된 방 {unmatched.length}개</b>
           </div>
           <div className="fhint" style={{ marginBottom: 10 }}>
-            봇이 본 적 있지만 규칙에 안 걸린 방입니다. 본문은 저장하지 않았습니다 — 규칙을 등록해도 지난
-            대화는 되살아나지 않고, 등록 이후 메시지부터 쌓입니다.
+            봇이 본 적 있지만 어느 거래처에도 안 붙은 방입니다. 없는 회사명으로 <b>#등록</b> 을 친 방도
+            여기 나옵니다. 본문은 저장하지 않았습니다 — 연결해도 지난 대화는 되살아나지 않고, 그 이후
+            메시지부터 쌓입니다.
           </div>
           <div className="list">
             {unmatched.map((u) => (
@@ -117,16 +97,10 @@ export function PartnersView({
                 partners={partners}
                 canEdit={canEdit}
                 pending={pending}
-                onAdopt={(partnerId, pattern) =>
+                onAdopt={(partnerId) =>
                   run(
-                    () =>
-                      actions.adoptUnmatchedRoom({
-                        unmatchedId: u.id,
-                        partnerId,
-                        kind: 'prefix',
-                        pattern,
-                      }),
-                    '규칙을 등록했어요. 다음 메시지부터 이 거래처로 모입니다.',
+                    () => actions.adoptUnmatchedRoom({ unmatchedId: u.id, partnerId }),
+                    '연결했어요. 다음 메시지부터 이 거래처로 모입니다.',
                   )
                 }
                 onDismiss={() => run(() => actions.dismissUnmatchedRoom(u.id), '목록에서 내렸어요.')}
@@ -136,7 +110,7 @@ export function PartnersView({
         </div>
       ) : null}
 
-      {/* 거래처 추가 */}
+      {/* 거래처 추가 — 회사명만 */}
       {canEdit ? (
         <div className="card" style={{ marginBottom: 14 }}>
           <div className="sh" style={{ marginBottom: 10 }}>
@@ -144,24 +118,14 @@ export function PartnersView({
             <b>거래처 추가</b>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-            <div className="fld" style={{ flex: '1 1 200px', marginBottom: 0 }}>
-              <label htmlFor="p-name">거래처명</label>
+            <div className="fld" style={{ flex: '1 1 240px', marginBottom: 0 }}>
+              <label htmlFor="p-name">회사명</label>
               <input
                 id="p-name"
                 className="tin"
                 value={newName}
-                onChange={(e) => onNameChange(e.target.value)}
+                onChange={(e) => setNewName(e.target.value)}
                 placeholder="삼성전자"
-              />
-            </div>
-            <div className="fld" style={{ flex: '1 1 220px', marginBottom: 0 }}>
-              <label htmlFor="p-pattern">방 이름 접두어</label>
-              <input
-                id="p-pattern"
-                className="tin"
-                value={newPattern}
-                onChange={(e) => setNewPattern(e.target.value)}
-                placeholder="[삼성전자]"
               />
             </div>
             <button
@@ -170,25 +134,18 @@ export function PartnersView({
               disabled={pending || !newName.trim()}
               onClick={() =>
                 run(async () => {
-                  const res = await actions.createPartner({
-                    name: newName,
-                    pattern: newPattern || undefined,
-                    kind: 'prefix',
-                  });
-                  if (!res.error) {
-                    setNewName('');
-                    setNewPattern('');
-                  }
+                  const res = await actions.createPartner({ name: newName });
+                  if (!res.error) setNewName('');
                   return res;
-                }, '거래처를 추가했어요.')
+                }, '거래처를 추가했어요. 이제 카톡방에서 #등록 으로 방을 붙이세요.')
               }
             >
               추가
             </button>
           </div>
           <div className="fhint">
-            방 이름이 <b>[삼성전자] 3분기 발주</b> 처럼 시작한다면 접두어는 <b>[삼성전자]</b> 입니다.
-            뒷부분이 바뀌어도 계속 같은 거래처로 붙습니다.
+            여기 적은 이름 그대로 방에서 쳐야 합니다. <b>삼성전자</b> 로 등록했으면 방에서는{' '}
+            <b>#등록 삼성전자</b> 입니다.
           </div>
         </div>
       ) : null}
@@ -199,7 +156,7 @@ export function PartnersView({
           <EmptyState
             icon="i-bldg"
             title="등록된 거래처가 없어요"
-            desc="거래처를 추가하고 방 이름 접두어를 등록하면 그 방부터 수집이 시작됩니다."
+            desc="회사명을 먼저 추가하세요. 그 다음 카톡방에서 #등록 회사명 을 치면 그 방부터 수집됩니다."
           />
         </div>
       ) : (
@@ -210,10 +167,9 @@ export function PartnersView({
               partner={p}
               canEdit={canEdit}
               pending={pending}
-              onAddRule={(kind, pattern) =>
-                run(() => actions.upsertRule({ partnerId: p.id, kind, pattern }), '규칙을 추가했어요.')
+              onUnlink={(ruleId) =>
+                run(() => actions.unlinkRoom(ruleId), '연결을 끊었어요. 이 방은 더 이상 수집되지 않습니다.')
               }
-              onDeleteRule={(ruleId) => run(() => actions.deleteRule(ruleId), '규칙을 지웠어요.')}
               onDelete={() => run(() => actions.deletePartner(p.id), '거래처를 지웠어요.')}
             />
           ))}
@@ -223,25 +179,46 @@ export function PartnersView({
   );
 }
 
+/** 처음 쓰는 사람이 순서를 틀리지 않게 하는 3단계 안내. */
+function HowTo() {
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="sh" style={{ marginBottom: 10 }}>
+        <Ic id="i-check" w={15} />
+        <b>연결하는 법</b>
+      </div>
+      <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.9 }}>
+        <li>
+          아래에서 <b>회사명</b>을 등록합니다.
+        </li>
+        <li>
+          카톡에서 그 방의 <b>방 제목을 지정</b>합니다. 제목이 없으면 등록이 거부됩니다.
+        </li>
+        <li>
+          그 방에서 <b>#등록 회사명</b> 을 한 번 칩니다. 끊을 때는 <b>#등록해제</b> 입니다.
+        </li>
+      </ol>
+      <div className="fhint">
+        봇이 설치된 폰의 주인이 직접 치면 안 됩니다 — 자기 발화는 알림에 뜨지 않아 봇이 못 봅니다.
+        방의 다른 사람이 치거나, 위 &ldquo;연결 안 된 방&rdquo; 목록에서 붙이세요.
+      </div>
+    </div>
+  );
+}
+
 function PartnerCard({
   partner,
   canEdit,
   pending,
-  onAddRule,
-  onDeleteRule,
+  onUnlink,
   onDelete,
 }: {
   partner: PartnerRow;
   canEdit: boolean;
   pending: boolean;
-  onAddRule: (kind: RoomRuleKind, pattern: string) => void;
-  onDeleteRule: (ruleId: string) => void;
+  onUnlink: (ruleId: string) => void;
   onDelete: () => void;
 }) {
-  const [adding, setAdding] = useState(false);
-  const [kind, setKind] = useState<RoomRuleKind>('prefix');
-  const [pattern, setPattern] = useState('');
-
   return (
     <div className="card" style={{ padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -249,46 +226,48 @@ function PartnerCard({
         <div style={{ flex: 1, minWidth: 0 }}>
           <b style={{ fontSize: 14, fontWeight: 800 }}>{partner.name}</b>
           <div className="pl-v" style={{ fontSize: 11.5, color: 'var(--mut)' }}>
-            규칙 {partner.rules.length}개 · 방 {partner.roomCount}개
+            연결된 방 {partner.rooms.length}개 · 수집 중인 방 {partner.roomCount}개
           </div>
         </div>
         {canEdit ? (
-          <>
-            <button type="button" className="chipx gy" disabled={pending} onClick={() => setAdding((v) => !v)}>
-              <Ic id="i-plus" w={11} />
-              규칙 추가
-            </button>
-            <button
-              type="button"
-              className="chipx rd"
-              disabled={pending}
-              onClick={() => {
-                if (window.confirm(`"${partner.name}" 거래처를 지울까요? 규칙도 함께 지워집니다. 모아둔 대화는 남습니다.`)) {
-                  onDelete();
-                }
-              }}
-            >
-              삭제
-            </button>
-          </>
+          <button
+            type="button"
+            className="chipx rd"
+            disabled={pending}
+            onClick={() => {
+              if (
+                window.confirm(
+                  `"${partner.name}" 거래처를 지울까요? 방 연결도 함께 끊깁니다. 모아둔 대화는 남습니다.`,
+                )
+              ) {
+                onDelete();
+              }
+            }}
+          >
+            삭제
+          </button>
         ) : null}
       </div>
 
-      {partner.rules.length === 0 ? (
+      {partner.rooms.length === 0 ? (
         <div className="fhint" style={{ color: '#C2410C' }}>
-          규칙이 없어 아무 방도 붙지 않습니다. 규칙을 하나 이상 등록하세요.
+          연결된 방이 없습니다. 카톡방에서 <b>#등록 {partner.name}</b> 을 치세요.
         </div>
       ) : (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-          {partner.rules.map((r: RuleRow) => (
-            <span key={r.id} className="chipx wt">
-              {KIND_LABELS[r.kind]} · {r.pattern}
+          {partner.rooms.map((r: BoundRoomRow) => (
+            <span key={r.ruleId} className="chipx wt">
+              {r.roomName}
               {canEdit ? (
                 <button
                   type="button"
-                  aria-label="규칙 삭제"
+                  aria-label={`${r.roomName} 연결 해제`}
                   disabled={pending}
-                  onClick={() => onDeleteRule(r.id)}
+                  onClick={() => {
+                    if (window.confirm(`"${r.roomName}" 방의 수집을 멈출까요? 모아둔 대화는 남습니다.`)) {
+                      onUnlink(r.ruleId);
+                    }
+                  }}
                   style={{ marginLeft: 4, color: 'var(--fnt)', fontWeight: 800 }}
                 >
                   ×
@@ -299,47 +278,52 @@ function PartnerCard({
         </div>
       )}
 
-      {adding && canEdit ? (
-        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <div className="fld" style={{ flex: '0 0 120px', marginBottom: 0 }}>
-            <label htmlFor={`k-${partner.id}`}>종류</label>
-            <select
-              id={`k-${partner.id}`}
-              className="tin"
-              value={kind}
-              onChange={(e) => setKind(e.target.value as RoomRuleKind)}
-            >
-              {(Object.keys(KIND_LABELS) as RoomRuleKind[]).map((k) => (
-                <option key={k} value={k}>
-                  {KIND_LABELS[k]}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="fld" style={{ flex: '1 1 200px', marginBottom: 0 }}>
-            <label htmlFor={`p-${partner.id}`}>패턴</label>
-            <input
-              id={`p-${partner.id}`}
-              className="tin"
-              value={pattern}
-              onChange={(e) => setPattern(e.target.value)}
-              placeholder={`[${partner.name}]`}
-            />
-          </div>
-          <button
-            type="button"
-            className="btn pri sm"
-            disabled={pending || !pattern.trim()}
-            onClick={() => {
-              onAddRule(kind, pattern);
-              setPattern('');
-              setAdding(false);
-            }}
-          >
-            등록
-          </button>
-        </div>
+      {partner.legacyRules.length > 0 ? (
+        <LegacyRules rules={partner.legacyRules} canEdit={canEdit} pending={pending} onUnlink={onUnlink} />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * 방 이름 패턴을 손으로 등록하던 시절의 규칙. 새로 만들 수는 없지만 남아 있으면 계속
+ * 매칭되므로, 보이지 않게 두면 "#등록해제 했는데 왜 계속 들어오지" 가 된다.
+ */
+function LegacyRules({
+  rules,
+  canEdit,
+  pending,
+  onUnlink,
+}: {
+  rules: RuleRow[];
+  canEdit: boolean;
+  pending: boolean;
+  onUnlink: (ruleId: string) => void;
+}) {
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div className="fhint" style={{ marginBottom: 6 }}>
+        예전 패턴 규칙 {rules.length}개 — 이 패턴에 걸리는 방은 <b>#등록</b> 없이도 수집됩니다. 지금
+        방식으로 정리하려면 지우고 방에서 <b>#등록</b> 을 치세요.
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {rules.map((r) => (
+          <span key={r.id} className="chipx gy">
+            {KIND_LABELS[r.kind]} · {r.pattern}
+            {canEdit ? (
+              <button
+                type="button"
+                aria-label="예전 규칙 삭제"
+                disabled={pending}
+                onClick={() => onUnlink(r.id)}
+                style={{ marginLeft: 4, color: 'var(--fnt)', fontWeight: 800 }}
+              >
+                ×
+              </button>
+            ) : null}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -356,13 +340,10 @@ function UnmatchedRow({
   partners: PartnerRow[];
   canEdit: boolean;
   pending: boolean;
-  onAdopt: (partnerId: string, pattern: string) => void;
+  onAdopt: (partnerId: string) => void;
   onDismiss: () => void;
 }) {
   const [partnerId, setPartnerId] = useState(partners[0]?.id ?? '');
-  // 방 이름 앞의 "[...]" 를 접두어 후보로 뽑는다. 우리 방 이름 관행이 그 형태라 대개 이게 정답이다.
-  const suggested = room.roomName.match(/^\[[^\]]+\]/)?.[0] ?? room.roomName;
-  const [pattern, setPattern] = useState(suggested);
 
   return (
     <div className="rowc" style={{ flexWrap: 'wrap', gap: 8 }}>
@@ -372,7 +353,8 @@ function UnmatchedRow({
       <span className="cm">
         <b>{room.roomName}</b>
         <span className="mt">
-          {room.hitCount}회 수신 · 마지막 {new Date(room.lastSeenAt).toLocaleString('ko-KR', {
+          {room.hitCount}회 수신 · 마지막{' '}
+          {new Date(room.lastSeenAt).toLocaleString('ko-KR', {
             month: 'numeric',
             day: 'numeric',
             hour: '2-digit',
@@ -384,7 +366,7 @@ function UnmatchedRow({
         <>
           <select
             className="tin"
-            style={{ flex: '0 0 140px' }}
+            style={{ flex: '0 0 160px' }}
             value={partnerId}
             onChange={(e) => setPartnerId(e.target.value)}
             aria-label="거래처 선택"
@@ -396,18 +378,11 @@ function UnmatchedRow({
               </option>
             ))}
           </select>
-          <input
-            className="tin"
-            style={{ flex: '0 0 160px' }}
-            value={pattern}
-            onChange={(e) => setPattern(e.target.value)}
-            aria-label="접두어"
-          />
           <button
             type="button"
             className="btn pri sm"
-            disabled={pending || !partnerId || !pattern.trim()}
-            onClick={() => onAdopt(partnerId, pattern)}
+            disabled={pending || !partnerId}
+            onClick={() => onAdopt(partnerId)}
           >
             연결
           </button>
@@ -416,59 +391,6 @@ function UnmatchedRow({
       <button type="button" className="chipx gy" disabled={pending} onClick={onDismiss}>
         무시
       </button>
-    </div>
-  );
-}
-
-/** 방 이름을 넣어 어느 거래처로 붙는지 미리 본다. 접두어 오타를 등록 전에 잡는 용도. */
-function RuleTester({
-  testRoomName,
-}: {
-  testRoomName: PartnersActions['testRoomName'];
-}) {
-  const [name, setName] = useState('');
-  const [result, setResult] = useState<Awaited<ReturnType<PartnersActions['testRoomName']>> | null>(null);
-  const [pending, start] = useTransition();
-
-  return (
-    <div className="card" style={{ marginBottom: 14 }}>
-      <div className="sh" style={{ marginBottom: 10 }}>
-        <Ic id="i-search" w={15} />
-        <b>규칙 시험</b>
-      </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <input
-          className="tin"
-          style={{ flex: '1 1 240px' }}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="[삼성전자] 3분기 발주"
-          aria-label="시험할 방 이름"
-        />
-        <button
-          type="button"
-          className="btn gho"
-          disabled={pending || !name.trim()}
-          onClick={() => start(async () => setResult(await testRoomName(name)))}
-        >
-          확인
-        </button>
-      </div>
-      {result ? (
-        <div className="fnote" style={{ marginTop: 10 }}>
-          <Ic id={result.matchedPartner ? 'i-check' : 'i-flag'} w={13} />
-          {result.matchedPartner ? (
-            <span>
-              <b>{result.matchedPartner}</b> 로 수집됩니다.
-              {result.candidates.length > 1
-                ? ` (겹치는 규칙 ${result.candidates.length}개 — 더 구체적인 쪽이 이깁니다)`
-                : ''}
-            </span>
-          ) : (
-            <span>걸리는 규칙이 없습니다. 이 방은 수집되지 않습니다.</span>
-          )}
-        </div>
-      ) : null}
     </div>
   );
 }

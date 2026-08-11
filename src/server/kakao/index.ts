@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { isStaffSpeaker, matchRoomRule, normalizeRoomName, type RoomRule } from './rules';
+import { escapeLikePattern } from './commands';
 
 export * from './rules';
+export * from './commands';
 
 // 거래처 카톡 수집 — 파싱·매칭·멱등·집계는 전부 결정론. AI 추론 없음.
 
@@ -323,6 +325,136 @@ export async function recordUnmatchedRoom(
     .from('kakao_unmatched_rooms')
     .insert({ workspace_id: workspaceId, room_key: roomKey, room_name: roomName });
   if (error) console.error('[kakao] 미분류 방 기록 실패', error.message);
+}
+
+// ── 방 등록/해제 (#등록 · #등록해제) ─────────────────────────────
+//
+// 방↔거래처 연결은 카톡방 안에서 "#등록 <회사명>" 으로만 만든다. 대시보드는 회사명만
+// 관리하고 방 이름 패턴을 다루지 않는다 — 방 제목 관행을 지키게 만드는 대신, 방에서
+// 한 번 선언하는 쪽이 실수가 적기 때문이다.
+//
+// 연결은 새 테이블 없이 exact 규칙 1건으로 표현한다. 그래야 규칙 조회·봇 배포·콘솔 편집이
+// 전부 기존 경로를 그대로 탄다. 매칭 경로가 둘로 갈라지지 않는다.
+
+export interface RoomBindResult {
+  ok: boolean;
+  /** 대시보드에 없는 회사명. 오타이거나 아직 거래처를 안 만든 것이다. */
+  partnerMissing?: boolean;
+  partnerId?: string;
+  partnerName?: string;
+  /** 다른 거래처에 붙어 있던 방을 옮겨왔으면 이전 거래처명 */
+  rebindedFrom?: string;
+  error?: string;
+}
+
+/**
+ * "#등록 <회사명>" — 이 방을 대시보드에 등록된 거래처에 붙인다.
+ *
+ * 없는 회사명이면 만들지 않고 거부한다. 방에서 친 오타로 "삼성전쟈" 같은 거래처가
+ * 생기면 아무도 눈치채지 못한 채 그 방 대화가 엉뚱한 곳에 쌓인다. 거래처를 만드는
+ * 곳은 대시보드 한 곳으로 둔다.
+ */
+export async function bindRoomToPartner(
+  sb: SupabaseClient,
+  workspaceId: string,
+  roomName: string,
+  partnerName: string,
+): Promise<RoomBindResult> {
+  const pattern = normalizeRoomName(roomName);
+  const name = normalizeRoomName(partnerName);
+  if (!pattern || !name) return { ok: false, error: '방 이름과 거래처명이 필요합니다' };
+
+  // partners_name_uniq 가 lower(name) 유니크라 대소문자만 다른 거래처는 같은 것으로 본다.
+  const { data: found, error: findErr } = await sb
+    .from('partners')
+    .select('id, name')
+    .eq('workspace_id', workspaceId)
+    .ilike('name', escapeLikePattern(name))
+    .maybeSingle();
+  if (findErr) return { ok: false, error: findErr.message };
+  if (!found) return { ok: false, partnerMissing: true };
+
+  const partnerId = found.id as string;
+  const partnerLabel = found.name as string;
+
+  const { data: existing } = await sb
+    .from('partner_room_rules')
+    .select('id, partner_id, partners(name)')
+    .eq('workspace_id', workspaceId)
+    .eq('kind', 'exact')
+    .ilike('pattern', escapeLikePattern(pattern))
+    .maybeSingle();
+
+  const now = new Date().toISOString();
+  let rebindedFrom: string | undefined;
+
+  if (existing) {
+    const rel = Array.isArray(existing.partners) ? existing.partners[0] : existing.partners;
+    const prevName = (rel as { name: string } | null)?.name;
+    if (prevName && existing.partner_id !== partnerId) rebindedFrom = prevName;
+
+    const { error } = await sb
+      .from('partner_room_rules')
+      .update({ partner_id: partnerId, enabled: true, updated_at: now })
+      .eq('id', existing.id as string);
+    if (error) return { ok: false, error: error.message };
+  } else {
+    const { error } = await sb.from('partner_room_rules').insert({
+      workspace_id: workspaceId,
+      partner_id: partnerId,
+      kind: 'exact',
+      pattern,
+      // 방에서 직접 지정한 것이 예전에 남아 있는 접두어 규칙보다 구체적인 의사표시다.
+      priority: 100,
+      enabled: true,
+    });
+    if (error) return { ok: false, error: error.message };
+  }
+
+  // 등록 전까지 미분류로 쌓인 흔적 정리. 실패해도 등록 자체는 성립하므로 막지 않는다.
+  const { error: delErr } = await sb
+    .from('kakao_unmatched_rooms')
+    .delete()
+    .eq('workspace_id', workspaceId)
+    .eq('room_key', roomKeyOf(null, pattern));
+  if (delErr) console.error('[kakao] 미분류 방 정리 실패', delErr.message);
+
+  return { ok: true, partnerId, partnerName: partnerLabel, rebindedFrom };
+}
+
+export interface RoomUnbindResult {
+  ok: boolean;
+  /** 지운 exact 규칙 수. 0 이면 애초에 #등록 으로 붙은 방이 아니다. */
+  removed: number;
+  /**
+   * 해제 후에도 다른 규칙(접두어 등)에 여전히 걸리는지.
+   * true 면 수집이 멈추지 않는다 — 콘솔에서 그 규칙을 손봐야 한다.
+   */
+  stillMatched: boolean;
+  error?: string;
+}
+
+export async function unbindRoom(
+  sb: SupabaseClient,
+  workspaceId: string,
+  roomName: string,
+): Promise<RoomUnbindResult> {
+  const pattern = normalizeRoomName(roomName);
+  if (!pattern) return { ok: false, removed: 0, stillMatched: false, error: '방 이름이 없습니다' };
+
+  // 이 방 이름과 정확히 같은 exact 규칙만 지운다. 접두어 규칙까지 지우면 같은 접두어를
+  // 쓰는 다른 방들의 수집이 통째로 멈춘다 — 방 하나 해제하려다 거래처 전체를 끊게 된다.
+  const { data: removedRows, error } = await sb
+    .from('partner_room_rules')
+    .delete()
+    .eq('workspace_id', workspaceId)
+    .eq('kind', 'exact')
+    .ilike('pattern', escapeLikePattern(pattern))
+    .select('id');
+  if (error) return { ok: false, removed: 0, stillMatched: false, error: error.message };
+
+  const stillMatched = !!(await matchRoomForWorkspace(sb, workspaceId, pattern));
+  return { ok: true, removed: removedRows?.length ?? 0, stillMatched };
 }
 
 // ── 조회 ────────────────────────────────────────────────────────
