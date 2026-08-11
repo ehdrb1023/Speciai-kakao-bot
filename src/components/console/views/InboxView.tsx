@@ -42,11 +42,16 @@ export interface InboxViewData {
 type Filter = 'all' | 'unhandled' | 'pinned';
 
 /**
- * 방 목록 폴링 주기. 카톡은 실시간이지만 이 화면은 읽기 전용 아카이브라 30초면 충분하다.
- * 더 짧게 잡을 이유가 없다 — 이 화면을 보고 즉시 답장하는 용도가 아니고(답장은 카톡에서 한다),
- * 사무실 몇 명이 하루종일 열어두는 화면이라 주기를 줄이면 요청만 배로 늘어난다.
+ * 방 목록 폴링 주기.
+ *
+ * 실측(2026-08-11): 카톡 발신 → 봇 폰 알림 7초 → 대시보드 반영까지 총 17초.
+ * 뒤쪽 10초가 이 주기 때문이라 30초에서 10초로 줄였다. 요청은 3배가 되지만 목록만
+ * 받아오는 호출이라 Vercel Pro 포함량의 몇 %다.
+ *
+ * 더 줄여도 체감은 별로 나아지지 않는다 — 앞단의 알림 7초가 남아 있어서다.
+ * 그 아래로 내리려면 폴링이 아니라 Supabase Realtime 으로 바꿔야 한다.
  */
-const POLL_MS = 30_000;
+const POLL_MS = 10_000;
 
 const COLORS = ['blue', 'green', 'amber', 'red', 'purple', 'gray'] as const;
 const COLOR_LABELS: Record<string, string> = {
