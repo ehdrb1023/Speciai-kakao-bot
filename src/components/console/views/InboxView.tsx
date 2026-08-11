@@ -34,7 +34,7 @@ export interface InboxViewData {
   rooms: InboxRoom[];
   messagesByRoom: Record<string, InboxMessage[]>;
   staffLabel: string;
-  /** 규칙에 안 걸려 본문을 저장하지 않은 방 수. 0 이 아니면 규칙 누락 신호다. */
+  /** 어느 거래처에도 연결되지 않아 본문을 저장하지 않은 방 수. */
   unmatchedCount: number;
 }
 
@@ -132,6 +132,39 @@ export function InboxView({ data }: { data: InboxViewData }) {
     }
   }
 
+  /**
+   * 방을 목록에서 내린다(soft delete). 대화 기록은 지우지 않는다 —
+   * "그때 뭐라고 했더라" 가 반드시 나오기 때문이다.
+   *
+   * 그 방에 새 메시지가 오면 다시 나타난다(서버 touchRoom 이 deleted_at 을 푼다).
+   * 살아 있는 방을 실수로 내려도 대화를 놓치지 않게 하기 위한 것이다.
+   */
+  async function hideRoom(roomId: string) {
+    const room = rooms.find((r) => r.id === roomId);
+    if (!room) return;
+    const label = room.partnerName ? `${room.partnerName} · ${room.roomName}` : room.roomName;
+    if (
+      !window.confirm(
+        `"${label}" 을 목록에서 내릴까요?\n\n` +
+          '모아둔 대화는 지워지지 않습니다. 그 방에 새 메시지가 오면 다시 나타납니다.\n' +
+          '수집 자체를 멈추려면 거래처 탭에서 방 연결을 끊거나 카톡방에서 #등록해제 를 치세요.',
+      )
+    ) {
+      return;
+    }
+
+    const remaining = rooms.filter((r) => r.id !== roomId);
+    setRooms(remaining);
+    if (activeId === roomId) setActiveId(remaining[0]?.id ?? null);
+
+    const res = await fetch('/api/kakao/room-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId }),
+    });
+    if (!res.ok) window.location.reload();
+  }
+
   if (rooms.length === 0) {
     return (
       <div className="console" style={{ display: 'block', height: 'auto' }}>
@@ -141,13 +174,13 @@ export function InboxView({ data }: { data: InboxViewData }) {
             title="아직 수집된 카톡방이 없어요"
             desc={
               data.unmatchedCount > 0
-                ? `봇이 방 ${data.unmatchedCount}개를 봤지만 등록된 거래처 규칙에 걸리지 않았어요. 거래처 탭에서 방 이름 규칙을 등록해 주세요.`
-                : '거래처 탭에서 방 이름 규칙을 등록하고, 봇 연동 탭의 안내대로 봇 단말을 켜면 여기에 대화가 쌓입니다.'
+                ? `봇이 방 ${data.unmatchedCount}개를 봤지만 어느 거래처에도 연결되지 않았어요. 거래처 탭에서 회사명을 등록하고, 그 방에서 #등록 회사명 을 치세요.`
+                : '거래처 탭에서 회사명을 등록하고, 카톡방에서 #등록 회사명 을 한 번 치면 여기에 대화가 쌓입니다.'
             }
             action={
               <button type="button" className="btn pri sm" onClick={() => navigateConsole('partners')}>
                 <Ic id="i-plus" w={14} />
-                거래처 규칙 등록하러 가기
+                거래처 등록하러 가기
               </button>
             }
           />
@@ -197,7 +230,7 @@ export function InboxView({ data }: { data: InboxViewData }) {
             style={{ textAlign: 'left', color: '#C2410C' }}
             onClick={() => navigateConsole('partners')}
           >
-            미분류 방 {data.unmatchedCount}개 — 규칙 등록하기
+            연결 안 된 방 {data.unmatchedCount}개 — 연결하러 가기
           </button>
         ) : null}
 
@@ -205,11 +238,20 @@ export function InboxView({ data }: { data: InboxViewData }) {
           <div className="csmeta">조건에 맞는 방이 없어요.</div>
         ) : (
           visibleRooms.map((room) => (
-            <button
+            // 숨기기 버튼을 안에 두어야 해서 div 다 — button 안에 button 은 넣을 수 없다.
+            <div
               key={room.id}
-              type="button"
+              role="button"
+              tabIndex={0}
               className={`room${room.id === activeId ? ' on' : ''}`}
+              style={{ cursor: 'pointer' }}
               onClick={() => void openRoom(room.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  void openRoom(room.id);
+                }
+              }}
             >
               <span className={`ci${room.color ? ` c-${room.color}` : ''}`}>
                 <Ic id="i-bubble" w={17} />
@@ -217,7 +259,7 @@ export function InboxView({ data }: { data: InboxViewData }) {
               <span className="cm">
                 <span className="nm">
                   {room.pinned ? <span className="pinmark">고정</span> : null}
-                  {room.partnerName ?? '(미지정 거래처)'}
+                  {room.partnerName ?? '거래처 연결 안 됨'}
                   {!room.handled ? <span className="live" /> : null}
                 </span>
                 <span className="rmnm">{room.roomName}</span>
@@ -226,8 +268,20 @@ export function InboxView({ data }: { data: InboxViewData }) {
               <span className="cr2">
                 <span className="rtime">{shortTime(room.lastMessageAt)}</span>
                 {!room.handled ? <span className="drafttag">미처리</span> : null}
+                <button
+                  type="button"
+                  className="roomdel"
+                  aria-label={`${room.roomName} 목록에서 내리기`}
+                  title="목록에서 내리기"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void hideRoom(room.id);
+                  }}
+                >
+                  ×
+                </button>
               </span>
-            </button>
+            </div>
           ))
         )}
       </aside>
@@ -238,7 +292,7 @@ export function InboxView({ data }: { data: InboxViewData }) {
           <>
             <header className="cmh">
               <div>
-                <b>{active.partnerName ?? '(미지정 거래처)'}</b>
+                <b>{active.partnerName ?? '거래처 연결 안 됨'}</b>
                 <div className="sub">
                   {active.roomName} · 메시지 {active.messageCount}건
                 </div>
@@ -335,7 +389,9 @@ export function InboxView({ data }: { data: InboxViewData }) {
             <div className="plist">
               <div className="pl-row">
                 <span className="pl-k">거래처</span>
-                <span className="pl-v">{active.partnerName ?? '미지정'}</span>
+                <span className={`pl-v${active.partnerName ? '' : ' pl-warn'}`}>
+                  {active.partnerName ?? '연결 안 됨'}
+                </span>
               </div>
               <div className="pl-row">
                 <span className="pl-k">방 제목</span>

@@ -361,6 +361,12 @@
   .console-v2 .room .pv{font-size:11.5px;color:var(--mut);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;display:block}
   .console-v2 .room .cr2{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex:none}
   .console-v2 .room .cr2 .rtime{font-size:10.5px;color:var(--mut);font-weight:600}
+  /* 숨기기 — 평소엔 안 보이고 행에 올렸을 때만 나타난다. 항상 보이면 30~40개 방 목록이
+     ×로 뒤덮여 읽기 어렵고, 스크롤하다 잘못 누르기도 쉽다. */
+  .console-v2 .room .roomdel{width:20px;height:20px;border-radius:6px;display:grid;place-items:center;
+    font-size:14px;font-weight:800;line-height:1;color:var(--mut);opacity:0;transition:opacity .15s,background .15s}
+  .console-v2 .room:hover .roomdel,.console-v2 .room .roomdel:focus-visible{opacity:1}
+  .console-v2 .room .roomdel:hover{background:#FEE2E2;color:#B91C1C}
   .console-v2 .cnt{min-width:19px;height:19px;border-radius:999px;background:var(--blue);color:#fff;font-size:10.5px;font-weight:800;display:grid;place-items:center;padding:0 6px}
   /* 미답변 = 처리해야 할 일. --amber/--orange 가 팔레트 블루 통일로 파랑(#3B6FD4)이 되어
      일반 파란 칩과 구분되지 않았다. 경고 성격이 드러나게 주황을 직접 쓴다. */

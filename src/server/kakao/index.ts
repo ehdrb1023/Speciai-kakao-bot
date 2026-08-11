@@ -289,6 +289,9 @@ async function touchRoom(sb: SupabaseClient, roomId: string, sentAt: Date, body:
       message_count: count ?? 0,
       // 새 메시지가 오면 처리완료를 해제한다 — 답장이 또 왔는데 목록에서 사라져 있으면 놓친다.
       handled_at: null,
+      // 숨긴 방도 같은 이유로 되살린다. 살아 있는 방을 실수로 내렸을 때 그 뒤 대화를
+      // 통째로 못 보게 되는 쪽이 훨씬 위험하다. 수집을 멈추려면 방 연결을 끊어야 한다.
+      deleted_at: null,
       updated_at: new Date().toISOString(),
     })
     .eq('id', roomId);
