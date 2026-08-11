@@ -1,6 +1,6 @@
 import { cookies } from 'next/headers';
 import { SignInForm } from '@/lib/ui';
-import { signInWithKakao } from '@/server/actions/auth';
+import { signInWithKakao, signInWithEmail, signUpWithEmail } from '@/server/actions/auth';
 import { BRAND } from '@/lib/brand';
 
 export const metadata = { title: `로그인 · ${BRAND.name}` };
@@ -35,7 +35,11 @@ export default async function Page() {
         <div className="auth-hero-note">{BRAND.name} · 내부 전용</div>
       </div>
       <div className="auth-form-side">
-        <SignInForm kakaoAction={signInWithKakao} />
+        <SignInForm
+          kakaoAction={signInWithKakao}
+          emailSignInAction={signInWithEmail}
+          emailSignUpAction={signUpWithEmail}
+        />
       </div>
     </div>
   );

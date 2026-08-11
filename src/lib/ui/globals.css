@@ -349,6 +349,43 @@ a {
   font-size: 16px;
   line-height: 1;
 }
+/* 이메일 로그인 폼 — 카카오 버튼과 병행한다. */
+.auth-email-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.auth-switch {
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 6px 0 16px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--g500);
+  cursor: pointer;
+}
+.auth-switch:hover {
+  color: var(--g900);
+  text-decoration: underline;
+}
+.auth-switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.auth-notice {
+  background: var(--g100);
+  color: var(--g700);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.5;
+}
 .auth-divider {
   display: flex;
   align-items: center;
