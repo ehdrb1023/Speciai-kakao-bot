@@ -11,6 +11,10 @@ coverage/
 .env
 .env.*
 !.env.example
+# 하위 디렉터리의 .env 도 막는다(위 패턴은 루트만 잡히는 상황이 있다).
+**/.env
+**/.env.*
+!**/.env.example
 
 # ── 배포 도구 ─────────────────────────────────────────────────
 .vercel
@@ -26,8 +30,46 @@ supabase/.env.keys
 # ── 봇 스크립트 로컬 사본 ─────────────────────────────────────
 # bot/speciai-bot.js 는 TOKEN 자리가 플레이스홀더인 상태로만 커밋한다.
 # 실제 토큰을 채운 사본은 아래 이름으로 두면 커밋되지 않는다.
+#
+# ⚠️ 실수 방지: bot/speciai-bot.js 에 직접 토큰을 적었다면 그건 추적 파일이라 커밋된다.
+#    반드시 bot/speciai-bot.local.js 로 복사해서 쓸 것. 단말에는 어차피 앱에 붙여넣으므로
+#    저장소에 채운 사본을 둘 이유가 없다.
 bot/*.local.js
 bot/*.secret.js
+bot/*.private.js
+
+# ── 자격증명·키 파일 ──────────────────────────────────────────
+# 이름만으로 비밀임이 드러나는 파일들. 실수로 프로젝트에 떨궈도 커밋되지 않게 한다.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+id_rsa*
+id_ed25519*
+*secret*.json
+*credential*.json
+service-account*.json
+gha-creds-*.json
+.npmrc
+.netrc
+
+# ── 로컬 전용 파일 통칭 ───────────────────────────────────────
+# *.local.* 로 이름 붙이면 무엇이든 커밋되지 않는다(설정·메모·덤프 등).
+*.local.json
+*.local.yml
+*.local.yaml
+*.local.md
+*.local.sh
+*.local.sql
+
+# ── DB 덤프 (거래처 대화 원문이 들어간다) ─────────────────────
+*.sql.gz
+*.dump
+dump.sql
+backup*.sql
 
 # ── 로그·임시 ─────────────────────────────────────────────────
 *.log

@@ -16,8 +16,9 @@
     "incremental": true,
     "allowJs": true,
     "noEmit": true,
-    "baseUrl": ".",
     "plugins": [{ "name": "next" }],
+    // baseUrl 없이 상대경로 매핑만 쓴다 — baseUrl 은 TS 6 에서 deprecated 경고, 7 에서 제거된다.
+    // "./src/*" 처럼 상대경로로 적으면 tsconfig 위치 기준으로 해석되어 baseUrl 이 필요 없다.
     "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src/**/*", "next-env.d.ts", ".next/types/**/*.ts"],
