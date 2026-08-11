@@ -611,15 +611,23 @@ var _notiLast = null;
 var _notiOk = false;
 var NOTI_TTL_MS = 15000;
 
+/**
+ * 알림 1건을 기억한다. 발신자 → 방 제목·본문·사진.
+ *
+ * ⚠️ 어떤 필드도 직전 기록에서 물려받지 않는다. 실측(2026-08-11)에서 물려받기가
+ * 개인 카톡 유출을 만들었다:
+ *   1) 신동규가 [테스트상자] 발주 방에서 말함 → _notiBySender["신동규"].room = 그 방
+ *   2) 같은 사람과의 1:1 개인 카톡 → 1:1 알림에는 conversationTitle 이 없어 room 이 빈 값
+ *   3) 빈 값이면 이전 방을 물려받도록 되어 있어 → 개인 대화가 거래처 방으로 전송됨
+ *
+ * "방 제목이 없다" 와 "같은 방인데 알림에 제목이 빠졌다" 는 알림만 보고 구별할 수 없다.
+ * 구별할 수 없으면 추측하지 않는다 — 그게 fail-closed 다. 제목을 못 얻으면 그 메시지는
+ * 규칙에 걸리지 않아 전송되지 않고, 그쪽이 훨씬 안전하다.
+ */
 function _rememberNoti(sender, room, text, imageB64) {
-  var prev = sender ? _notiBySender[String(sender)] : null;
   var rec = {
-    room: room || (prev ? prev.room : ''),
-    text: (text !== null && text !== undefined && String(text).length > 0)
-      ? String(text)
-      : (prev ? prev.text : ''),
-    // 사진은 직전 알림 것을 물려받지 않는다. 물려받으면 다음 텍스트 메시지에
-     // 엉뚱한 사진이 붙는다.
+    room: room || '',
+    text: (text !== null && text !== undefined) ? String(text) : '',
     image: imageB64 || null,
     at: _now(),
   };
@@ -627,14 +635,39 @@ function _rememberNoti(sender, room, text, imageB64) {
   _notiLast = rec;
 }
 
-function _lookupNotiRoom(sender) {
+/**
+ * 이 알림 기록이 지금 처리 중인 메시지의 것인지 본문으로 대조한다.
+ *
+ * 알림 훅과 메시지 콜백은 서로 독립된 이벤트라 순서가 보장되지 않는다. 순서가 뒤집히면
+ * 같은 사람의 "직전 알림" 이 다른 방(개인 카톡) 것일 수 있고, 그대로 믿으면 개인 대화가
+ * 거래처 방으로 들어간다. 본문이 맞지 않으면 방 제목을 포기한다 — 포기하면 규칙에
+ * 걸리지 않아 전송되지 않는다(fail-closed).
+ *
+ * 알림 본문은 길면 잘리므로 완전일치를 요구하지 않고 앞부분 대조로 본다.
+ */
+function _notiTextMatches(recText, msgText) {
+  var a = trimText(recText);
+  var b = trimText(msgText);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  var head = (a.length < b.length ? a : b).slice(0, 20);
+  if (head.length < 4) return false;
+  return a.indexOf(head) >= 0 && b.indexOf(head) >= 0;
+}
+
+function _lookupNotiRoom(sender, msgText) {
   var now = _now();
   if (sender) {
     var r = _notiBySender[String(sender)];
-    if (r && r.room && (now - r.at) < NOTI_TTL_MS) return r.room;
+    if (r && r.room && (now - r.at) < NOTI_TTL_MS && _notiTextMatches(r.text, msgText)) {
+      return r.room;
+    }
   }
-  // 직전 알림이 아주 최근(1.5초 이내)이면 그 방으로 본다.
-  if (_notiLast && _notiLast.room && (now - _notiLast.at) < 1500) return _notiLast.room;
+  // 직전 알림이 아주 최근(1.5초 이내)이면 그 방으로 본다. 본문 대조는 여기서도 요구한다.
+  if (_notiLast && _notiLast.room && (now - _notiLast.at) < 1500
+      && _notiTextMatches(_notiLast.text, msgText)) {
+    return _notiLast.room;
+  }
   return null;
 }
 
@@ -903,7 +936,7 @@ try {
           // room 이 발신자명이면(단톡방인데 방 제목을 못 읽은 것) 알림에서 찾은 진짜 방 제목으로
           // 교정한다. 접두어 규칙이 걸리려면 방 제목이 정확해야 한다.
           try {
-            var realRoom = _lookupNotiRoom(sname);
+            var realRoom = _lookupNotiRoom(sname, ctext);
             if (realRoom) {
               if (rname === sname || !rname) grp = true;
               rname = realRoom;
@@ -956,25 +989,35 @@ if (_api2) {
 function response(room, msg, sender, isGroupChat, replier, imageDB, packageName) {
   if (_api2Fired) return;
 
-  var rname = room;
-  var grp = isGroupChat;
-  var realRoom = _lookupNotiRoom(sender);
-  if (realRoom) {
-    rname = realRoom;
-    grp = true;
-  } else if (room === sender) {
-    // 복원 실패 — 이 상태로는 규칙이 걸리지 않아 전송되지 않는다.
-    // notiHook=false 면 이 단말이 onNotificationPosted 를 지원하지 않는 것이고,
-    // true 인데 실패면 그 방에 제목이 지정돼 있지 않은 것이다.
-    Log.e('kakao-bot[구API] 방제목 복원 실패 sender="' + sender + '" notiHook=' + _notiSeen);
-  }
-
+  // 진입 여부를 무조건 남긴다. 실측에서 "알림은 사진을 꺼냈는데 그 뒤 아무 로그도 없는"
+  // 상황이 있었다. 이 줄이 안 보이면 메신저봇R 이 그 메시지로 response 를 부르지 않은 것이고,
+  // 보이는데 그 뒤가 없으면 아래 어딘가에서 죽은 것이다. 본문은 남기지 않는다.
   var isPhoto = looksLikePhoto(msg);
-  var img = extractImage(null, imageDB, isPhoto);
-  if (!img && isPhoto) {
-    img = _takeNotiImage(sender);
-    if (!img) logPhotoMiss('구API');
-  }
+  Log.i('kakao-bot[구API] 진입 room="' + room + '" sender="' + sender + '" photo=' + isPhoto);
 
-  handleMessage(rname, msg, sender, grp, img, null, null);
+  // 여기서 예외가 나면 메신저봇R 이 조용히 삼켜 원인이 안 보인다. 직접 잡아서 남긴다.
+  try {
+    var rname = room;
+    var grp = isGroupChat;
+    var realRoom = _lookupNotiRoom(sender, msg);
+    if (realRoom) {
+      rname = realRoom;
+      grp = true;
+    } else if (room === sender) {
+      // 복원 실패 — 이 상태로는 규칙이 걸리지 않아 전송되지 않는다.
+      // notiHook=false 면 이 단말이 onNotificationPosted 를 지원하지 않는 것이고,
+      // true 인데 실패면 방 제목이 없거나 알림 본문이 이 메시지와 맞지 않는 것이다.
+      Log.e('kakao-bot[구API] 방제목 복원 실패 sender="' + sender + '" notiHook=' + _notiSeen);
+    }
+
+    var img = extractImage(null, imageDB, isPhoto);
+    if (!img && isPhoto) {
+      img = _takeNotiImage(sender);
+      if (!img) logPhotoMiss('구API');
+    }
+
+    handleMessage(rname, msg, sender, grp, img, null, null);
+  } catch (e) {
+    Log.e('kakao-bot[구API] 처리 예외: ' + e);
+  }
 }
