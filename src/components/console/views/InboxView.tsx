@@ -40,6 +40,13 @@ export interface InboxViewData {
 
 type Filter = 'all' | 'unhandled' | 'pinned';
 
+/**
+ * 방 목록 폴링 주기. 카톡은 실시간이지만 이 화면은 읽기 전용 아카이브라 30초면 충분하다.
+ * 더 짧게 잡을 이유가 없다 — 이 화면을 보고 즉시 답장하는 용도가 아니고(답장은 카톡에서 한다),
+ * 사무실 몇 명이 하루종일 열어두는 화면이라 주기를 줄이면 요청만 배로 늘어난다.
+ */
+const POLL_MS = 30_000;
+
 const COLORS = ['blue', 'green', 'amber', 'red', 'purple', 'gray'] as const;
 const COLOR_LABELS: Record<string, string> = {
   blue: '파랑',
@@ -59,6 +66,14 @@ export function InboxView({ data }: { data: InboxViewData }) {
   const [filter, setFilter] = useState<Filter>('all');
   const [colorOpen, setColorOpen] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
+
+  // 폴링 루프는 한 번만 만들고 최신 값을 ref 로 읽는다. rooms·activeId 를 의존성에 넣으면
+  // 메시지가 올 때마다 타이머가 재생성돼 주기가 어긋난다.
+  const roomsRef = useRef(rooms);
+  const activeIdRef = useRef(activeId);
+  // 낙관적 갱신(고정·처리완료·숨김)이 서버에 반영되기 전에 폴링 결과가 덮으면 방금 누른 게
+  // 되돌아간다. 쓰기가 진행 중이면 그 주기는 건너뛴다.
+  const writesInFlight = useRef(0);
 
   const active = rooms.find((r) => r.id === activeId) ?? null;
   const activeMessages = activeId ? messages[activeId] : undefined;
@@ -107,6 +122,69 @@ export function InboxView({ data }: { data: InboxViewData }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [activeId, activeMessages]);
 
+  useEffect(() => {
+    roomsRef.current = rooms;
+  }, [rooms]);
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
+  /**
+   * 30초마다 방 목록을 다시 받아온다. 봇이 메시지를 올려도 이 화면은 스스로 알 방법이 없어
+   * 새로고침 전까지 옛 상태로 남아 있었다.
+   *
+   * 탭이 보일 때만 돈다. 사무실에서 하루종일 열어두는 화면이라, 백그라운드 탭·잠긴 화면에서도
+   * 계속 부르면 아무도 안 보는 응답을 밤새 만들어내게 된다.
+   */
+  useEffect(() => {
+    let stopped = false;
+
+    async function poll() {
+      if (stopped) return;
+      if (document.visibilityState !== 'visible') return;
+      if (writesInFlight.current > 0) return;
+
+      try {
+        const res = await fetch('/api/kakao/rooms', { cache: 'no-store' });
+        if (!res.ok || stopped) return;
+        const json = (await res.json()) as { rooms?: InboxRoom[] };
+        const next = json.rooms;
+        if (!next || stopped) return;
+
+        const before = roomsRef.current;
+        setRooms(next);
+
+        // 열어둔 방에 새 메시지가 있을 때만 대화를 다시 받는다. 매 주기마다 전체 대화를
+        // 받으면 방 하나에 300건씩 실려 와 폴링 비용이 목록의 수십 배가 된다.
+        const openId = activeIdRef.current;
+        if (!openId) return;
+        const prevRoom = before.find((r) => r.id === openId);
+        const nextRoom = next.find((r) => r.id === openId);
+        if (!nextRoom || prevRoom?.lastMessageAt === nextRoom.lastMessageAt) return;
+
+        const threadRes = await fetch(`/api/kakao/thread?roomId=${encodeURIComponent(openId)}`);
+        if (!threadRes.ok || stopped) return;
+        const threadJson = (await threadRes.json()) as { messages?: InboxMessage[] };
+        setMessages((prev) => ({ ...prev, [openId]: threadJson.messages ?? [] }));
+      } catch {
+        // 네트워크가 끊긴 것뿐이다. 다음 주기에 다시 시도한다.
+      }
+    }
+
+    // 탭으로 돌아오면 30초를 기다리지 않고 즉시 한 번 — 다른 일 하다 온 사이 쌓인 것을 바로 보여준다.
+    function onVisible() {
+      if (document.visibilityState === 'visible') void poll();
+    }
+
+    const timer = setInterval(() => void poll(), POLL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
   async function patchRoom(roomId: string, patch: { pinned?: boolean; handled?: boolean; color?: string | null }) {
     // 낙관적 갱신 — 토글 반응이 왕복 지연만큼 늦으면 두 번 누르게 된다.
     setRooms((prev) =>
@@ -121,14 +199,19 @@ export function InboxView({ data }: { data: InboxViewData }) {
           : r,
       ),
     );
-    const res = await fetch('/api/kakao/room-state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId, ...patch }),
-    });
-    if (!res.ok) {
-      // 실패하면 서버 상태를 모르는 채로 두지 않는다.
-      window.location.reload();
+    writesInFlight.current += 1;
+    try {
+      const res = await fetch('/api/kakao/room-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId, ...patch }),
+      });
+      if (!res.ok) {
+        // 실패하면 서버 상태를 모르는 채로 두지 않는다.
+        window.location.reload();
+      }
+    } finally {
+      writesInFlight.current -= 1;
     }
   }
 
@@ -157,12 +240,17 @@ export function InboxView({ data }: { data: InboxViewData }) {
     setRooms(remaining);
     if (activeId === roomId) setActiveId(remaining[0]?.id ?? null);
 
-    const res = await fetch('/api/kakao/room-delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ roomId }),
-    });
-    if (!res.ok) window.location.reload();
+    writesInFlight.current += 1;
+    try {
+      const res = await fetch('/api/kakao/room-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId }),
+      });
+      if (!res.ok) window.location.reload();
+    } finally {
+      writesInFlight.current -= 1;
+    }
   }
 
   if (rooms.length === 0) {
