@@ -13,7 +13,7 @@ export function StaffAliasesPanel({
 }: {
   aliases: string[];
   canEdit: boolean;
-  saveAction: (aliases: string[]) => Promise<{ error?: string }>;
+  saveAction: (aliases: string[]) => Promise<{ error?: string; reclassified?: number }>;
 }) {
   const [list, setList] = useState<string[]>(aliases);
   const [draft, setDraft] = useState('');
@@ -24,7 +24,18 @@ export function StaffAliasesPanel({
     setList(next);
     start(async () => {
       const res = await saveAction(next);
-      setMsg(res.error ? `저장 실패: ${res.error}` : '저장했어요.');
+      if (res.error) {
+        setMsg(`저장 실패: ${res.error}`);
+        return;
+      }
+      if (!res.reclassified) {
+        setMsg('저장했어요.');
+        return;
+      }
+      // 받은 카톡 화면은 이미 불러온 대화를 들고 있어서, 서버에서 side 를 고쳐도
+      // 그 방을 다시 열기 전까지 옛 색 그대로다. 몇 건이 바뀌었는지 알린 뒤 새로 불러온다.
+      setMsg(`저장했어요. 지난 메시지 ${res.reclassified}건의 표시를 다시 맞췄습니다. 화면을 새로 불러옵니다…`);
+      window.setTimeout(() => window.location.reload(), 1200);
     });
   }
 
@@ -37,6 +48,8 @@ export function StaffAliasesPanel({
       <div className="fhint" style={{ marginBottom: 10 }}>
         여기 등록한 이름의 발화만 대화창 오른쪽(노란 말풍선)에 표시됩니다. 카톡에서 쓰는 실제 닉네임을
         그대로 넣으세요. 3자 이상이면 부분일치도 잡습니다.
+        <br />
+        저장하면 <b>이미 쌓인 대화의 표시도 함께 다시 맞춥니다.</b>
       </div>
 
       {list.length > 0 ? (
