@@ -179,3 +179,37 @@ export async function switchWorkspace(workspaceId: string) {
   revalidatePath('/');
   return {};
 }
+
+/**
+ * 발신 표시 이름 — 대시보드에서 쓴 글이 카톡방에 `[이 이름] 본문` 으로 나간다.
+ *
+ * 가입할 때 이메일 앞부분으로 자동 설정되는데(`martin1023`), 그 값이 그대로 거래처 방에
+ * 찍힌다. 거래처가 보는 이름이므로 사람이 정할 수 있어야 한다. 바꿀 화면이 없어서
+ * 아이디가 그대로 나가고 있었다(2026-08-12).
+ *
+ * 이 값은 계정별이다 — 담당자마다 자기 이름으로 나간다. 방 필터·발화자 판정과는 무관하고
+ * (그건 workspaces.staff_aliases 가 본다), 이미 나간 메시지는 바뀌지 않는다.
+ */
+export async function saveDisplayName(name: string) {
+  const cookieStore = await cookies();
+  const session = await getSession(cookieStore);
+  if (!session) return { error: '로그인이 필요합니다' };
+
+  // 대괄호는 지운다 — 접두가 `[이름] 본문` 이라 이름 안에 대괄호가 있으면 거래처 화면에서
+  // 접두가 어디서 끝나는지 알 수 없다(composeWireText 도 같은 이유로 지운다).
+  const clean = name.replace(/[[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  if (!clean) return { error: '이름을 입력하세요' };
+
+  const sb = createSupabaseServerClient(cookieStore);
+  const { error } = await sb.from('profiles').update({ display_name: clean }).eq('id', session.userId);
+  if (error) return { error: error.message };
+
+  await logAudit({
+    action: 'workspace.update',
+    targetTable: 'profiles',
+    targetId: session.userId,
+    meta: { displayName: clean },
+  });
+  revalidatePath('/');
+  return { name: clean };
+}

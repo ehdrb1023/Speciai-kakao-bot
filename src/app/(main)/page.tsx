@@ -18,7 +18,7 @@ import {
   dismissUnmatchedRoom,
 } from '@/server/actions/partners';
 import { invite, changeRole, removeMember, cancelInvite } from '@/server/actions/members';
-import { saveStaffAliases } from '@/server/actions/workspace';
+import { saveStaffAliases, saveDisplayName } from '@/server/actions/workspace';
 import { signOut } from '@/server/actions/auth';
 
 // 받은 카톡만 static(기본 탭). 나머지는 탭별 코드분할 — 초기 청크에서 분리한다.
@@ -28,6 +28,9 @@ const PartnersView = dynamic(() =>
 const LinkView = dynamic(() => import('@/components/console/views/LinkView').then((m) => m.LinkView));
 const StaffAliasesPanel = dynamic(() =>
   import('@/components/StaffAliasesPanel').then((m) => m.StaffAliasesPanel),
+);
+const DisplayNamePanel = dynamic(() =>
+  import('@/components/DisplayNamePanel').then((m) => m.DisplayNamePanel),
 );
 
 export default async function Page() {
@@ -186,6 +189,10 @@ export default async function Page() {
         ),
         settings: (
           <>
+            <DisplayNamePanel
+              current={session.displayName ?? session.email.split('@')[0] ?? ''}
+              saveAction={saveDisplayName}
+            />
             <StaffAliasesPanel
               aliases={staffAliases}
               canEdit={canEdit}

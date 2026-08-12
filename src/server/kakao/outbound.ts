@@ -150,23 +150,37 @@ export async function claimOutbound(
   const claimed = data ?? [];
   if (claimed.length === 0) return [];
 
-  // 방 이름은 따로 읽는다. 봇의 전송 API 가 방 제목으로 알림 세션을 찾으므로 이름이 없으면
-  // 보낼 수 없다 — 조인 한 번을 아끼려다 이 값이 비면 조용히 아무것도 안 나간다.
+  // 봇에게 내려보낼 방 이름을 따로 읽는다. 없으면 보낼 수 없다 — 조인 한 번을 아끼려다
+  // 이 값이 비면 조용히 아무것도 안 나간다.
+  //
+  // ⚠️ 여기서 내려보내는 것은 **화면에 보이는 이름이 아니라 규칙 pattern** 이다.
+  // 봇은 받은 방 이름을 자기 규칙 목록과 대조해서 "규칙에 없는 방에는 안 쓴다" 를 한 번 더
+  // 검사한다(개인 카톡방에 글이 써지는 것을 막는 마지막 방어선). 그런데 room_name 은
+  // 사람이 읽을 이름(거래처명)으로 갈아 끼워져 있어서 규칙에 걸리지 않는다.
+  // 실측 2026-08-12: room_name 을 내려보냈더니 단말이 전부 "규칙에 없는 방" 으로 거부했다.
   const roomIds = [...new Set(claimed.map((r) => r.room_id as string))];
   const { data: rooms, error: roomErr } = await sb
     .from('kakao_rooms')
-    .select('id, room_name')
+    .select('id, room_name, matched_rule_id, partner_room_rules(pattern)')
     .in('id', roomIds);
   if (roomErr) {
     console.error('[kakao] 발신 방 이름 조회 실패', roomErr.message);
     return [];
   }
-  const nameById = new Map((rooms ?? []).map((r) => [r.id as string, r.room_name as string]));
+  const wireNameById = new Map(
+    (rooms ?? []).map((r) => {
+      const rule = Array.isArray(r.partner_room_rules) ? r.partner_room_rules[0] : r.partner_room_rules;
+      const pattern = (rule as { pattern: string } | null)?.pattern;
+      // 규칙이 지워진 방(#등록해제 뒤 남은 행)은 어차피 단말이 거부한다. 이름으로 폴백해
+      // 실패가 로그에 남게 두는 편이 조용히 사라지는 것보다 낫다.
+      return [r.id as string, pattern ?? (r.room_name as string)];
+    }),
+  );
 
   return claimed
     .map((r) => ({
       id: r.id as string,
-      room: nameById.get(r.room_id as string) ?? '',
+      room: wireNameById.get(r.room_id as string) ?? '',
       text: composeWireText(r.author_name as string, r.body as string),
     }))
     .filter((j) => !!j.room);
