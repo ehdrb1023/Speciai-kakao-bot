@@ -1136,6 +1136,18 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
   }
 
   var known = isAllowedRoom(room);
+
+  // 1:1 개인톡은 등록돼 있지 않으면 보내지 않는다. 선필터를 꺼둔 상태에서도 이건 막는다.
+  //
+  // 1:1 방의 이름은 상대 이름이라 room === sender 로 알아볼 수 있다. 이걸 올려봐야 서버는
+  // 본문을 버리고, 미분류 목록만 개인 연락처로 채워진다. 방 등록은 방 안에서
+  // "#등록 <회사명>" 으로만 하므로 목록에 안 떠도 등록에 지장이 없다.
+  // 등록된 1:1 방(거래처와 1:1 로 일하는 경우)은 known 이라 그대로 수집된다.
+  if (!known && !cmd && normRoom(room) === normRoom(sender)) {
+    Log.i('kakao-bot: 등록 안 된 1:1 — 보내지 않는다');
+    return;
+  }
+
   if (DEVICE_FILTER && !known && !cmd) {
     // 규칙에 없는 방 = 개인 카톡. 로그에도 방 이름만 남기고 본문은 남기지 않는다.
     Log.i('kakao-bot: 규칙 밖 방 스킵 room="' + room + '"');
@@ -1801,7 +1813,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12q DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12r DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);

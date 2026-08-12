@@ -14,6 +14,21 @@ export interface RoomRule {
   kind: RoomRuleKind;
   pattern: string;
   priority: number;
+  /** 거래처명. 방 이름이 열쇠(`방#…`)일 때 화면에 대신 보여줄 이름이다. */
+  partnerName?: string | null;
+}
+
+/**
+ * 봇이 방 제목을 못 얻어 열쇠로 지어낸 이름인가.
+ *
+ * 이 단말의 카톡 알림에는 방 제목이 없어서 봇이 알림 식별자로 `방#<열쇠>` 를 만든다.
+ * 매칭에는 그 값이 그대로 필요하지만(그게 유일한 방 구분 근거다), 사람에게 보여줄 이름으로는
+ * 쓸모가 없다. 화면에서는 거래처명으로 갈아 끼운다 — 표시만 바꾸는 것이고 매칭은 안 건드린다.
+ */
+export const ROOM_KEY_PREFIX = '방#';
+
+export function isGeneratedRoomName(name: string): boolean {
+  return normalizeRoomName(name).startsWith(ROOM_KEY_PREFIX);
 }
 
 /**

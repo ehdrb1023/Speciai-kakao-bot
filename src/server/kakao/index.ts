@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { isStaffSpeaker, matchRoomRule, normalizeRoomName, type RoomRule } from './rules';
+import { isGeneratedRoomName, isStaffSpeaker, matchRoomRule, normalizeRoomName, type RoomRule } from './rules';
 import { escapeLikePattern } from './commands';
 
 export * from './rules';
@@ -100,20 +100,24 @@ export async function resolveBotWorkspaceId(sb: SupabaseClient): Promise<string 
 export async function loadRules(sb: SupabaseClient, workspaceId: string): Promise<RoomRule[]> {
   const { data, error } = await sb
     .from('partner_room_rules')
-    .select('id, partner_id, kind, pattern, priority')
+    .select('id, partner_id, kind, pattern, priority, partners(name)')
     .eq('workspace_id', workspaceId)
     .eq('enabled', true);
   if (error) {
     console.error('[kakao] 규칙 조회 실패', error.message);
     return [];
   }
-  return (data ?? []).map((r) => ({
-    id: r.id as string,
-    partnerId: r.partner_id as string,
-    kind: r.kind as RoomRule['kind'],
-    pattern: r.pattern as string,
-    priority: r.priority as number,
-  }));
+  return (data ?? []).map((r) => {
+    const partner = Array.isArray(r.partners) ? r.partners[0] : r.partners;
+    return {
+      id: r.id as string,
+      partnerId: r.partner_id as string,
+      kind: r.kind as RoomRule['kind'],
+      pattern: r.pattern as string,
+      priority: r.priority as number,
+      partnerName: (partner as { name: string } | null)?.name ?? null,
+    };
+  });
 }
 
 async function loadStaffAliases(sb: SupabaseClient, workspaceId: string): Promise<string[]> {
@@ -212,14 +216,24 @@ export async function ingestBotMessage(
 
   // 규칙 미매칭 — 본문을 저장하지 않는다. 개인 카톡이 여기까지 왔더라도 방 이름만 남는다.
   if (!matched) {
-    await recordUnmatchedRoom(sb, input.workspaceId, roomKey, roomName);
+    // 1:1 개인톡은 후보 목록에 올리지 않는다. 1:1 방의 이름은 상대 이름이라
+    // (room === speaker) 목록이 개인 연락처로 채워지고, 정작 찾아야 할 거래처 방이 묻힌다.
+    // 방 등록은 방 안에서 "#등록 <회사명>" 으로만 하므로 목록에 없어도 등록에 지장이 없다.
+    if (normalizeRoomName(roomName) !== speaker) {
+      await recordUnmatchedRoom(sb, input.workspaceId, roomKey, roomName);
+    }
     return { ok: true, unmatched: true, inserted: 0, skipped: 0 };
   }
+
+  // 봇이 방 제목을 못 얻어 "방#<열쇠>" 로 지어 보낸 경우, 화면에는 거래처명을 보여준다.
+  // 매칭에 쓰는 값(roomKey·규칙 pattern)은 그대로 열쇠다 — 바꾸는 것은 표시 이름뿐이다.
+  const displayName =
+    isGeneratedRoomName(roomName) && matched.partnerName ? matched.partnerName : roomName;
 
   const room = await upsertRoom(sb, {
     workspaceId: input.workspaceId,
     roomKey,
-    roomName,
+    roomName: displayName,
     partnerId: matched.partnerId,
     matchedRuleId: matched.id,
   });

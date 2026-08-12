@@ -12,6 +12,19 @@ import { EmptyState } from '../EmptyState';
 import type { PartnerRow, RuleRow, BoundRoomRow } from '@/server/actions/partners';
 import type { RoomRuleKind } from '@/server/kakao/rules';
 import { seoulMonthDayTime } from '@/lib/time';
+import { isGeneratedRoomName } from '@/server/kakao/rules';
+
+/**
+ * 화면에 보여줄 방 이름.
+ *
+ * 이 단말의 카톡 알림에는 방 제목이 없어서 봇이 알림 식별자로 `방#<열쇠>` 를 지어 보낸다.
+ * 매칭에는 그 값이 그대로 필요하지만 사람에게는 아무 의미가 없다. 목록에서는 거래처명으로
+ * 바꿔 보여주고, 열쇠는 마우스를 올렸을 때만 보이게 둔다(같은 거래처 방이 둘일 때 구분용).
+ */
+function roomLabel(roomName: string, partnerName?: string): string {
+  if (!isGeneratedRoomName(roomName)) return roomName;
+  return partnerName ? `${partnerName} 카톡방` : '카톡방';
+}
 
 export interface UnmatchedRoom {
   id: string;
@@ -66,7 +79,7 @@ export function PartnersView({
       <div className="vhead">
         <h1>거래처</h1>
         <div className="sub">
-          여기에 회사명을 등록하고, 아래 “연결 안 된 방” 목록에서 그 방을 붙이면 수집이 시작됩니다.
+          여기에 회사명을 등록하고, 카톡방에서 <b>#등록 회사명</b> 을 한 번 치면 그 방부터 수집됩니다.
         </div>
       </div>
 
@@ -86,9 +99,9 @@ export function PartnersView({
             <b>연결 안 된 방 {unmatched.length}개</b>
           </div>
           <div className="fhint" style={{ marginBottom: 10 }}>
-            봇이 본 적 있지만 어느 거래처에도 안 붙은 방입니다. 없는 회사명으로 <b>#등록</b> 을 친 방도
-            여기 나옵니다. 본문은 저장하지 않았습니다 — 연결해도 지난 대화는 되살아나지 않고, 그 이후
-            메시지부터 쌓입니다.
+            봇이 본 적 있지만 어느 거래처에도 안 붙은 <b>단톡방</b>입니다. 없는 회사명으로
+            <b>#등록</b> 을 친 방도 여기 나옵니다(오타 확인용). 개인 1:1 카톡은 올라오지 않습니다.
+            본문은 저장하지 않았습니다 — 붙여도 지난 대화는 되살아나지 않고 그 이후부터 쌓입니다.
           </div>
           <div className="list">
             {unmatched.map((u) => (
@@ -138,7 +151,7 @@ export function PartnersView({
                   const res = await actions.createPartner({ name: newName });
                   if (!res.error) setNewName('');
                   return res;
-                }, '거래처를 추가했어요. 이제 “연결 안 된 방” 목록에서 방을 붙이세요.')
+                }, '거래처를 추가했어요. 이제 그 카톡방에서 #등록 으로 붙이세요.')
               }
             >
               추가
@@ -157,7 +170,7 @@ export function PartnersView({
           <EmptyState
             icon="i-bldg"
             title="등록된 거래처가 없어요"
-            desc="회사명을 먼저 추가하세요. 그 다음 “연결 안 된 방” 목록에서 그 방을 붙이면 수집이 시작됩니다."
+            desc="회사명을 먼저 추가하세요. 그 다음 카톡방에서 #등록 회사명 을 치면 그 방부터 수집됩니다."
           />
         </div>
       ) : (
@@ -193,19 +206,19 @@ function HowTo() {
           아래에서 <b>회사명</b>을 등록합니다.
         </li>
         <li>
-          그 방에서 <b>아무나 한 마디</b> 하면 위 &ldquo;연결 안 된 방&rdquo; 목록에 그 방이 뜹니다.
+          그 카톡방에서 <b>#등록 회사명</b> 을 한 번 칩니다. 여기 등록한 이름 그대로 쳐야 합니다.
         </li>
         <li>
-          목록에서 그 방을 회사에 <b>연결</b>합니다. 이때부터 수집이 시작됩니다.
+          이때부터 그 방 대화가 이 회사로 모입니다. 끊을 때는 <b>#등록해제</b> 입니다.
         </li>
       </ol>
       <div className="fhint">
-        방 안에서 <b>#등록 회사명</b> 을 쳐서 붙일 수도 있습니다(끊을 때는 <b>#등록해제</b>).
-        다만 봇이 설치된 폰의 주인이 직접 치면 안 됩니다 — 자기 발화는 알림에 뜨지 않아 봇이 못
-        봅니다. 방의 다른 사람이 쳐야 합니다. 목록에서 붙이는 쪽이 확실합니다.
+        <b>봇이 설치된 폰의 주인이 직접 치면 안 됩니다</b> — 자기 발화는 알림에 뜨지 않아 봇이
+        못 봅니다. 방의 다른 사람이 쳐야 합니다.
         <br />
-        방 이름이 <b>방#…</b> 처럼 뜨는 것은 정상입니다. 이 단말의 카톡 알림은 방 제목을 실어
-        보내지 않아, 봇이 알림 자체의 식별자로 방을 구분합니다. 연결하고 나면 회사명으로 표시됩니다.
+        이 단말의 카톡 알림에는 방 제목이 실려오지 않아서, 봇은 알림 자체의 식별자로 방을
+        구분합니다. 그래서 <b>#등록</b> 이 방을 지목하는 유일한 방법이고, 화면에 보이는 이름은
+        그때 친 회사명입니다.
       </div>
     </div>
   );
@@ -256,20 +269,20 @@ function PartnerCard({
 
       {partner.rooms.length === 0 ? (
         <div className="fhint" style={{ color: '#C2410C' }}>
-          연결된 방이 없습니다. 그 방에서 한 마디 하면 위 “연결 안 된 방” 목록에 뜹니다.
+          연결된 방이 없습니다. 카톡방에서 <b>#등록 {partner.name}</b> 을 치세요.
         </div>
       ) : (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
           {partner.rooms.map((r: BoundRoomRow) => (
-            <span key={r.ruleId} className="chipx wt">
-              {r.roomName}
+            <span key={r.ruleId} className="chipx wt" title={r.roomName}>
+              {roomLabel(r.roomName, partner.name)}
               {canEdit ? (
                 <button
                   type="button"
-                  aria-label={`${r.roomName} 연결 해제`}
+                  aria-label={`${roomLabel(r.roomName, partner.name)} 연결 해제`}
                   disabled={pending}
                   onClick={() => {
-                    if (window.confirm(`"${r.roomName}" 방의 수집을 멈출까요? 모아둔 대화는 남습니다.`)) {
+                    if (window.confirm(`"${roomLabel(r.roomName, partner.name)}" 의 수집을 멈출까요? 모아둔 대화는 남습니다.`)) {
                       onUnlink(r.ruleId);
                     }
                   }}

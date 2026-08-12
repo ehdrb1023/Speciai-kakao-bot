@@ -397,7 +397,7 @@ export function InboxView({ data }: { data: InboxViewData }) {
             title="아직 수집된 카톡방이 없어요"
             desc={
               data.unmatchedCount > 0
-                ? `봇이 방 ${data.unmatchedCount}개를 봤지만 어느 거래처에도 연결되지 않았어요. 거래처 탭에서 회사명을 등록한 뒤, “연결 안 된 방” 목록에서 붙이세요.`
+                ? `봇이 방 ${data.unmatchedCount}개를 봤지만 어느 거래처에도 연결되지 않았어요. 거래처 탭에서 회사명을 등록한 뒤, 그 방에서 #등록 회사명 을 치세요.`
                 : '거래처 탭에서 회사명을 등록하고, 카톡방에서 #등록 회사명 을 한 번 치면 여기에 대화가 쌓입니다.'
             }
             action={
