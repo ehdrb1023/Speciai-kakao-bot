@@ -486,6 +486,21 @@ a {
   border-color: var(--blue);
   box-shadow: 0 0 0 4px var(--blue-bg);
 }
+/* 입력이 없는 화면(온보딩)에서 버튼만 덩그러니 놓이지 않게 다음 단계를 알려주는 문구. */
+.auth-note {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--g500);
+  font-weight: 500;
+  background: var(--g50);
+  border-radius: 10px;
+  padding: 12px 14px;
+  word-break: keep-all;
+}
+.auth-note b {
+  font-weight: 800;
+  color: var(--g900);
+}
 .auth-submit {
   width: 100%;
   justify-content: center;

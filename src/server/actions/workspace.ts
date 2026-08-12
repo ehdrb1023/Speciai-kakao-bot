@@ -1,5 +1,6 @@
 'use server';
 
+import { randomUUID } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
@@ -8,31 +9,47 @@ import { createSupabaseServerClient, getSession } from '@/lib/auth/server';
 import { isStaffSpeaker } from '@/server/kakao/rules';
 import { logAudit } from '../audit';
 
-export async function createWorkspace(data: { name: string; slug: string }) {
+/**
+ * 워크스페이스는 사내 전용이라 하나뿐이다. 그래서 이름·식별자를 사람에게 묻지 않는다.
+ *
+ * 식별자(slug)는 화면 어디에도 안 나오고 URL 에도 안 쓴다 — DB 유니크 제약을 채우는 값이라
+ * 사람이 정할 이유가 없다. 이름도 가입 시점에 물어봐야 알 수 있는 정보가 아니고, 잘못
+ * 적어도 고칠 화면이 없어서 오히려 틀린 채로 굳는다. 회사명은 대시보드에서 거래처로 관리한다.
+ */
+const DEFAULT_WORKSPACE_NAME = '사내 워크스페이스';
+
+export async function createWorkspace() {
   const cookieStore = await cookies();
   const session = await getSession(cookieStore);
   if (!session) return { error: '로그인이 필요합니다' };
 
   const sb = createSupabaseServerClient(cookieStore);
 
-  const { data: wsId, error } = await sb.rpc('create_workspace', {
-    p_name: data.name,
-    p_slug: data.slug,
-  });
-  if (error) {
-    if (error.message.includes('slug_taken')) return { error: '이미 사용중인 식별자입니다' };
-    if (error.message.includes('not authenticated')) return { error: '인증 세션이 만료되었습니다' };
-    return { error: error.message };
-  }
-  if (!wsId) return { error: '워크스페이스 생성 실패' };
+  // 무작위 slug 라 충돌은 사실상 없지만, 부딪히면 사용자에게 되묻지 않고 다시 뽑는다.
+  let lastError = '워크스페이스 생성 실패';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const slug = `ws-${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    const { data: wsId, error } = await sb.rpc('create_workspace', {
+      p_name: DEFAULT_WORKSPACE_NAME,
+      p_slug: slug,
+    });
 
-  await logAudit({
-    action: 'workspace.create',
-    targetTable: 'workspaces',
-    targetId: wsId,
-    meta: { name: data.name, slug: data.slug },
-  });
-  redirect('/');
+    if (!error && wsId) {
+      await logAudit({
+        action: 'workspace.create',
+        targetTable: 'workspaces',
+        targetId: wsId,
+        meta: { name: DEFAULT_WORKSPACE_NAME, slug },
+      });
+      redirect('/');
+    }
+
+    if (error?.message.includes('slug_taken')) continue;
+    if (error?.message.includes('not authenticated')) return { error: '인증 세션이 만료되었습니다' };
+    if (error) return { error: error.message };
+    lastError = '워크스페이스 생성 실패';
+  }
+  return { error: lastError };
 }
 
 /**
