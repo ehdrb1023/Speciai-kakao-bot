@@ -4,8 +4,11 @@
  * 이 스크립트는 메신저봇R(Android) 앱에 등록해 업무 전용 단말에서 실행한다.
  * 봇 계정을 거래처 단톡방에 초대하면, 그 방 메시지를 서버로 보낸다.
  *
- * ★ 이 봇은 어떤 경우에도 카톡방에 말하지 않는다. 읽어서 보내기만 한다.
- *   자동응답이 없으므로 카카오의 자동화 탐지에 걸릴 여지도 그만큼 줄어든다.
+ * ★ 이 봇이 방에 쓰는 것은 대시보드에서 사람이 쓴 글뿐이다(발신 큐).
+ *   자동응답·자동인사·자동확인은 없다. 사람이 누르지 않으면 이 봇은 한 글자도 쓰지 않는다.
+ *   자동응답을 넣지 않는 이유는 카카오의 자동화 탐지다 — 기계적 응답 패턴이 계정 정지를
+ *   부르고, 정지되면 수집까지 함께 멈춘다. 발신에 4초 이상 간격과 무작위 지연을 두는 것도
+ *   같은 이유다.
  *
  * ★ 개인 카톡 보호 — 이것이 이 봇의 핵심이다.
  *   서버에서 "연결된 방" 목록을 주기적으로 내려받아, 그 방만 서버로 전송한다.
@@ -30,13 +33,17 @@
  *   POST {ENDPOINT}       헤더 X-Ingest-Token: {TOKEN}
  *        → { room, sender, text, ts, chatId?, logId?, image?, imageName? }
  *          ts 는 단말이 메시지를 받은 시각. 재전송으로 늦게 도착해도 원래 시각으로 남는다.
- *        ← { ok, inserted, skipped, unmatched?, registered?, unregistered? }
+ *        ← { ok, inserted, skipped, unmatched?, registered?, unregistered?, outbox? }
  *          registered/unregistered 가 오면 규칙을 즉시 다시 받아온다.
+ *          outbox 가 실려 오면 그 방으로 나갈 발신 건이다(거래처가 방금 말한 방이라 세션이 확실).
+ *   POST {OUTBOX_ENDPOINT} 헤더 X-Ingest-Token: {TOKEN}
+ *        → { acks: [{ id, ok, error? }] }   직전에 보낸 것들의 결과
+ *        ← { ok, outbox: [{ id, room, text }] }  보낼 것
  *
  * 설치:
  *   1) Play스토어 "메신저봇R" 설치 → 알림 접근 권한·배터리 최적화 해제 허용
  *   2) 봇 새로 만들기 → 이 파일 내용 전체 붙여넣기(기존 코드 싹 지우고)
- *   3) 아래 설정 3줄 채우기 → 컴파일 ON → 봇 계정으로 거래처 방 초대 → 방에서 #등록
+ *   3) 아래 설정 4줄 채우기 → 컴파일 ON → 봇 계정으로 거래처 방 초대 → 방에서 #등록
  *
  * ※ API2(BotManager + Event.MESSAGE) 우선. v0.7.29a 이상에서 동작한다.
  *   메신저봇R 은 알림 파싱 기반이라 단말에 따라 방 제목 대신 발신자명이 오는 경우가 있다.
@@ -50,6 +57,7 @@
 //    실제 단말에는 메신저봇R 앱에 직접 붙여넣으므로 저장소에 채운 사본을 둘 이유가 없다.
 var ENDPOINT = 'https://<배포도메인>/api/kakao/bot/ingest';
 var RULES_ENDPOINT = 'https://<배포도메인>/api/kakao/bot/rules';
+var OUTBOX_ENDPOINT = 'https://<배포도메인>/api/kakao/bot/outbox';
 var TOKEN = '<KAKAO_INGEST_TOKEN>'; // 서버 env KAKAO_INGEST_TOKEN 과 같은 값
 
 // ── 동작 옵션 ─────────────────────────────────────────────────
@@ -57,6 +65,12 @@ var HANDLE_GROUP_ONLY = false;      // true 면 단톡방만. 일부 단말이 �
 var SEND_TIMEOUT_MS = 8000;
 var RULES_REFRESH_MS = 10 * 60 * 1000;  // 규칙 갱신 주기(10분)
 var RULES_CACHE_FILE = 'sq-kakao-rules.json'; // 앱 재시작 후에도 규칙을 유지하기 위한 캐시
+
+// 대시보드 발신. false 로 두면 이 봇은 예전처럼 읽기만 한다.
+var OUTBOX_ENABLED = true;
+var OUTBOX_POLL_MS = 15000;    // "보낼 것 있나" 를 물어보는 주기
+var SEND_MIN_GAP_MS = 4000;    // 연속 발신 최소 간격. 기계적 연타는 자동화로 탐지된다
+var SEND_JITTER_MS = 1200;     // 그 위에 얹는 무작위 지연 — 간격이 일정하면 그것도 기계 신호다
 
 /** 규칙 캐시 파일 경로. 큐와 같은 쓰기 가능 디렉터리를 쓴다. */
 function rulesCachePath() {
@@ -490,6 +504,261 @@ function flushQueue() {
   }
 }
 
+// ── 전송 가능 확인 (임시 진단) ────────────────────────────────
+//
+// 대시보드에서 쓴 글을 카톡방에 내보내려면 메신저봇R 의 전송이 이 단말에서 실제로 되는지
+// 부터 알아야 한다. 메신저봇R 의 전송은 알림에 실린 RemoteInput 세션으로 나가는데,
+// 단말·카톡 버전에 따라 아예 동작하지 않거나 세션이 금방 만료된다.
+//
+// 등록된 방에서 "#전송테스트" 를 치면 서버로 보내지 않고 단말에서만 세 경로를 시도한다.
+//   ① 이벤트 replier(chat.reply / replier.reply)  ② bot.send(room)  ③ Api.replyRoom(room)
+// 60초 뒤 같은 방에 한 번 더 보낸다. 이 두 번째가 나가야 "방이 조용한 동안에도 발신 가능",
+// 즉 대시보드에서 아무 때나 쓸 수 있다는 뜻이 된다. 안 나가면 거래처가 말을 건 직후에만
+// 나가는 구조가 된다. 확인이 끝나면 이 블록은 지운다.
+var PROBE_CMD = '#전송테스트';
+var PROBE_DELAY_MS = 60000;
+
+function probeSendOnce(room, reply, tag) {
+  var out = [];
+
+  try {
+    if (reply) {
+      var r1 = reply('[전송테스트' + tag + '] ① replier');
+      out.push('replier=OK(' + r1 + ')');
+    } else {
+      out.push('replier=없음');
+    }
+  } catch (e1) { out.push('replier=ERR ' + e1); }
+
+  try {
+    if (_bot && _bot.send) {
+      var can = '?';
+      try { if (_bot.canReply) can = String(_bot.canReply(room)); } catch (eC) {}
+      var r2 = _bot.send(room, '[전송테스트' + tag + '] ② bot.send');
+      out.push('bot.send=OK(' + r2 + ') canReply=' + can);
+    } else {
+      out.push('bot.send=없음');
+    }
+  } catch (e2) { out.push('bot.send=ERR ' + e2); }
+
+  try {
+    if (typeof Api !== 'undefined' && Api.replyRoom) {
+      var r3 = Api.replyRoom(room, '[전송테스트' + tag + '] ③ Api.replyRoom');
+      out.push('Api.replyRoom=OK(' + r3 + ')');
+    } else {
+      out.push('Api.replyRoom=없음');
+    }
+  } catch (e3) { out.push('Api.replyRoom=ERR ' + e3); }
+
+  Log.i('kakao-bot[전송테스트' + tag + '] room="' + room + '" ' + out.join(' | '));
+}
+
+function probeSend(room, reply) {
+  probeSendOnce(room, reply, '');
+
+  // 지연 재시도는 별도 스레드로 돌린다. 여기서 sleep 하면 그동안 들어오는 메시지 수집이 멈춘다.
+  try {
+    var t = new java.lang.Thread(new java.lang.Runnable({
+      run: function () {
+        try { java.lang.Thread.sleep(PROBE_DELAY_MS); } catch (eS) {}
+        try { probeSendOnce(room, reply, '+60초'); } catch (eR) { Log.e('kakao-bot[전송테스트] 지연 예외: ' + eR); }
+      }
+    }));
+    t.setDaemon(true);
+    t.start();
+  } catch (e) {
+    Log.e('kakao-bot[전송테스트] 지연 스레드 생성 실패 — ' + e);
+  }
+}
+
+// ── 대시보드 발신 ─────────────────────────────────────────────
+//
+// 방향이 반대인 경로다. 대시보드에서 쓴 글을 서버가 큐에 적어두면, 이 봇이 가져가 방에 넣는다.
+// 서버는 카톡에 직접 말할 수 없다 — 알림에 실린 RemoteInput 세션을 가진 것은 이 단말뿐이다.
+//
+// ★ 여기서도 규칙 밖 방에는 아무것도 하지 않는다. 서버가 주는 방 이름이 규칙에 없으면 버린다.
+//   서버가 실수로(또는 토큰이 새서) 엉뚱한 방 이름을 내려보내도 개인 카톡방에 글이 써지지 않는다.
+//
+// ★ 같은 건이 두 번 나가지 않는 근거는 서버의 claim 이다. 내려준 순간 sending 으로 잠긴다.
+//   그래서 보낸 직후 결과를 바로 알려준다 — 늦게 알릴수록 "보냈는데 못 알린" 창이 커지고,
+//   그 창에서 폰이 죽으면 서버가 되살려 같은 말이 두 번 나간다.
+var _outboxGen = '';
+var OUTBOX_GEN_PROP = 'sq.kakao.outbox.gen';
+var _pendingJobs = [];   // 인입 응답에 얹혀 온 것 — 다음 주기에 루프가 집어간다
+var _lastSendAt = 0;
+
+/** 인입 응답 본문에서 얹혀 온 발신 건을 꺼낸다. 거래처가 방금 말한 방이라 세션이 가장 확실하다. */
+function takeOutboxFrom(body) {
+  if (!OUTBOX_ENABLED || !body || body.indexOf('"outbox"') < 0) return;
+  try {
+    var obj = JSON.parse(body);
+    if (obj && obj.outbox && obj.outbox.length) {
+      for (var i = 0; i < obj.outbox.length; i++) _pendingJobs.push(obj.outbox[i]);
+      Log.i('kakao-bot[발신] 인입 응답에 ' + obj.outbox.length + '건 실려옴');
+    }
+  } catch (e) {
+    Log.e('kakao-bot[발신] 인입 응답 파싱 실패 — ' + e);
+  }
+}
+
+/**
+ * 결과 보고 + 새 작업 수령을 한 번의 왕복으로 한다.
+ * 실패하면 null 을 돌린다 — 이때 이미 보낸 것의 결과가 유실되지만, 서버가 리스 만료로
+ * 되살려 다시 내려주므로 최악의 경우 같은 말이 한 번 더 나간다. 그래서 보고를 미루지 않는다.
+ */
+function outboxPost(acks) {
+  var conn = null;
+  try {
+    var url = new java.net.URL(OUTBOX_ENDPOINT);
+    conn = url.openConnection();
+    conn.setRequestMethod('POST');
+    conn.setConnectTimeout(SEND_TIMEOUT_MS);
+    conn.setReadTimeout(SEND_TIMEOUT_MS);
+    conn.setDoOutput(true);
+    conn.setRequestProperty('Content-Type', 'application/json; charset=utf-8');
+    conn.setRequestProperty('X-Ingest-Token', TOKEN);
+
+    var payload = JSON.stringify({ acks: acks || [] });
+    var os = conn.getOutputStream();
+    os.write(new java.lang.String(payload).getBytes('UTF-8'));
+    os.flush();
+    os.close();
+
+    var code = conn.getResponseCode();
+    if (code !== 200) {
+      Log.e('kakao-bot[발신] 조회 실패 code=' + code);
+      return null;
+    }
+    var reader = new java.io.BufferedReader(
+      new java.io.InputStreamReader(conn.getInputStream(), 'UTF-8'));
+    var body = '';
+    var line;
+    while ((line = reader.readLine()) !== null) body += line;
+    reader.close();
+
+    var obj = JSON.parse(body);
+    return (obj && obj.outbox) ? obj.outbox : [];
+  } catch (e) {
+    Log.e('kakao-bot[발신] 조회 예외: ' + e);
+    return null;
+  } finally {
+    if (conn !== null) { try { conn.disconnect(); } catch (e2) {} }
+  }
+}
+
+/**
+ * 방에 실제로 글을 넣는다.
+ *
+ * 반환값 판정이 애매한 점에 주의: 메신저봇R 버전에 따라 이 API 들이 boolean 을 주기도 하고
+ * 아무것도 안 주기도 한다. 그래서 "명시적으로 false 일 때만 실패" 로 본다 — undefined 를
+ * 실패로 치면 잘 나간 메시지를 3번 더 보내게 된다(같은 말이 방에 네 번 뜬다).
+ */
+function sendToRoom(room, text) {
+  if (!isAllowedRoom(room)) {
+    return { ok: false, error: '규칙에 없는 방 — 단말에서 거부' };
+  }
+
+  var lastErr = '';
+
+  if (_bot && _bot.send) {
+    try {
+      var r1 = _bot.send(room, text);
+      if (r1 !== false) return { ok: true, via: 'bot.send' };
+      lastErr = 'bot.send=false (알림 세션 없음)';
+    } catch (e1) { lastErr = 'bot.send 예외 ' + e1; }
+  }
+
+  if (typeof Api !== 'undefined' && Api.replyRoom) {
+    try {
+      var r2 = Api.replyRoom(room, text);
+      if (r2 !== false) return { ok: true, via: 'Api.replyRoom' };
+      lastErr = 'Api.replyRoom=false (알림 세션 없음)';
+    } catch (e2) { lastErr = 'Api.replyRoom 예외 ' + e2; }
+  }
+
+  return { ok: false, error: lastErr || '전송 API 없음' };
+}
+
+/** 연속 발신 사이 간격을 벌린다. 사람이 치는 속도를 벗어나면 자동화로 탐지된다. */
+function sendGap() {
+  var wait = SEND_MIN_GAP_MS - (_now() - _lastSendAt);
+  var jitter = Math.floor(Math.random() * SEND_JITTER_MS);
+  if (wait < 0) wait = 0;
+  try { java.lang.Thread.sleep(wait + jitter); } catch (e) {}
+  _lastSendAt = _now();
+}
+
+/** 밀린 것이 없어질 때까지 보내고 그때마다 결과를 보고한다. */
+function outboxDrain() {
+  if (!OUTBOX_ENABLED) return;
+
+  var jobs = _pendingJobs;
+  _pendingJobs = [];
+
+  for (var round = 0; round < 5; round++) {
+    var acks = [];
+    for (var i = 0; i < jobs.length; i++) {
+      var job = jobs[i];
+      if (!job || !job.id || !job.room || !job.text) continue;
+      sendGap();
+      var res = sendToRoom(String(job.room), String(job.text));
+      if (res.ok) {
+        Log.i('kakao-bot[발신] 전송 room="' + job.room + '" via=' + res.via);
+        acks.push({ id: String(job.id), ok: true });
+      } else {
+        Log.e('kakao-bot[발신] 실패 room="' + job.room + '" — ' + res.error);
+        acks.push({ id: String(job.id), ok: false, error: String(res.error) });
+      }
+    }
+
+    // 보고와 다음 작업 수령이 같은 왕복이다. 보낼 게 없으면 acks 만 비우고 끝난다.
+    var next = outboxPost(acks);
+    if (next === null || next.length === 0) return;
+    jobs = next;
+  }
+}
+
+/**
+ * 발신 폴링 루프.
+ *
+ * 스크립트를 다시 컴파일하면 새 스코프가 만들어지고 옛 루프는 그대로 살아 있다. 그대로 두면
+ * 컴파일할 때마다 루프가 하나씩 늘어 같은 메시지를 여러 번 집어가려 한다. 그래서 세대(gen)를
+ * 시스템 프로퍼티에 박아두고, 값이 바뀐 루프는 스스로 빠진다.
+ */
+function startOutboxLoop() {
+  if (!OUTBOX_ENABLED) {
+    Log.i('kakao-bot[발신] 꺼짐 — 읽기 전용으로 동작');
+    return;
+  }
+
+  _outboxGen = String(_now()) + '-' + String(Math.floor(Math.random() * 1000000));
+  try { java.lang.System.setProperty(OUTBOX_GEN_PROP, _outboxGen); } catch (e) {}
+
+  var myGen = _outboxGen;
+  try {
+    var t = new java.lang.Thread(new java.lang.Runnable({
+      run: function () {
+        while (true) {
+          try { java.lang.Thread.sleep(OUTBOX_POLL_MS); } catch (eS) { return; }
+          var cur = '';
+          try { cur = String(java.lang.System.getProperty(OUTBOX_GEN_PROP)); } catch (eP) {}
+          if (cur !== myGen) {
+            Log.i('kakao-bot[발신] 이전 세대 루프 종료');
+            return;
+          }
+          try { outboxDrain(); } catch (eD) { Log.e('kakao-bot[발신] 루프 예외: ' + eD); }
+        }
+      }
+    }));
+    t.setDaemon(true);
+    t.start();
+    Log.i('kakao-bot[발신] 폴링 시작 — ' + (OUTBOX_POLL_MS / 1000) + '초 주기');
+  } catch (e) {
+    // 루프가 안 서도 인입 응답에 얹혀 오는 건은 그대로 나간다(거래처가 말을 건 직후에만).
+    Log.e('kakao-bot[발신] 폴링 스레드 생성 실패 — ' + e);
+  }
+}
+
 // ── 전송 ──────────────────────────────────────────────────────
 //
 // ts 를 반드시 실어 보낸다. 없으면 서버가 수신 시각을 쓰는데, 재시도로 몇 분 뒤에 도착하면
@@ -547,7 +816,12 @@ function postPayload(obj) {
 
     // 4xx 는 다시 보내도 같은 결과다(토큰 오타·본문 불량). 큐에 넣으면 영원히 재시도한다.
     // 5xx·429 는 서버 쪽 일시 문제라 재시도 대상이다.
-    if (code >= 200 && code < 300) return { ok: true, body: body };
+    if (code >= 200 && code < 300) {
+      // 이 방으로 나갈 것이 응답에 실려 왔으면 받아둔다. 여기서 바로 보내지 않는 이유는
+      // 발신 간격(4초+)만큼 수집이 멈추기 때문이다. 발신 루프가 집어간다.
+      takeOutboxFrom(body);
+      return { ok: true, body: body };
+    }
     if (code >= 400 && code < 500 && code !== 429) {
       Log.e('kakao-bot POST 영구실패 code=' + code + ' — 재시도하지 않음');
       return { ok: false, retry: false, body: body };
@@ -563,7 +837,7 @@ function postPayload(obj) {
 }
 
 // ── 수집 본체 (구·신 API 공통) ────────────────────────────────
-function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId) {
+function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, reply) {
   if (HANDLE_GROUP_ONLY && !isGroupChat) return;
 
   // 메시지가 도착한 시각을 여기서 못 박는다. 큐에 들어가 나중에 보내도 이 값이 따라간다.
@@ -593,6 +867,12 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId) 
   if (!isAllowedRoom(room) && !cmd) {
     // 규칙에 없는 방 = 개인 카톡. 로그에도 방 이름만 남기고 본문은 남기지 않는다.
     Log.i('kakao-bot: 규칙 밖 방 스킵 room="' + room + '"');
+    return;
+  }
+
+  // 전송 확인은 단말에서 끝난다 — 서버로 올리지 않고 저장도 하지 않는다(임시 진단).
+  if (text === PROBE_CMD) {
+    probeSend(room, reply);
     return;
   }
 
@@ -876,6 +1156,8 @@ readCachedRules();
 refreshRules(true);
 // 앱이 죽어 있던 동안 밀린 것을 먼저 올린다. 파일 큐가 되는 단말에서만 남아 있다.
 flushQueue();
+// 대시보드에서 쓴 것을 가져와 방에 넣는 루프. 읽기 경로와 독립적으로 돈다.
+startOutboxLoop();
 
 try {
   _api2Why = 'BotManager=' + (typeof BotManager) + ' Event=' + (typeof Event);
@@ -955,7 +1237,12 @@ try {
             if (!img) logPhotoMiss('API2');
           }
 
-          handleMessage(rname, ctext, sname, grp, img, chId, logId);
+          // chat.reply 는 이 이벤트의 알림 세션을 물고 있다. 그대로 넘기지 않고 감싸는 이유는
+          // Rhino 에서 메서드만 떼면 this 가 풀리기 때문이다.
+          var replyFn = null;
+          try { if (chat && chat.reply) replyFn = function (t) { return chat.reply(t); }; } catch (eRp) {}
+
+          handleMessage(rname, ctext, sname, grp, img, chId, logId, replyFn);
         } catch (eMain) {
           Log.e('kakao-bot[API2] 처리 예외: ' + eMain);
         }
@@ -1016,7 +1303,10 @@ function response(room, msg, sender, isGroupChat, replier, imageDB, packageName)
       if (!img) logPhotoMiss('구API');
     }
 
-    handleMessage(rname, msg, sender, grp, img, null, null);
+    var replyFn = null;
+    try { if (replier && replier.reply) replyFn = function (t) { return replier.reply(t); }; } catch (eRp) {}
+
+    handleMessage(rname, msg, sender, grp, img, null, null, replyFn);
   } catch (e) {
     Log.e('kakao-bot[구API] 처리 예외: ' + e);
   }

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { createSupabaseServerClient, getSession } from '@/lib/auth/server';
-import { listRoomMessages } from '@/server/kakao';
+import { listRoomMessages, listRoomOutbound } from '@/server/kakao';
 
 // 방 대화 지연 로드. 초기 렌더는 첫 방만 싣고, 나머지는 클릭 시 여기로 가져온다.
 export async function GET(req: Request) {
@@ -16,6 +16,11 @@ export async function GET(req: Request) {
   }
 
   const sb = createSupabaseServerClient(await cookies());
-  const messages = await listRoomMessages(sb, session.workspaceId, roomId);
-  return NextResponse.json({ messages });
+  // 아직 안 나간 발신 건은 대화 끝에 "대기" 로 얹어 보여준다. 이미 나간 것은 kakao_messages
+  // 쪽에 복사돼 있으므로 여기서 또 주지 않는다(두 번 뜬다).
+  const [messages, outbound] = await Promise.all([
+    listRoomMessages(sb, session.workspaceId, roomId),
+    listRoomOutbound(sb, session.workspaceId, roomId),
+  ]);
+  return NextResponse.json({ messages, outbound }, { headers: { 'Cache-Control': 'no-store' } });
 }

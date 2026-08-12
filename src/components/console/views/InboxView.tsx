@@ -31,10 +31,31 @@ export interface InboxMessage {
   attachment: { path: string; type: string; name: string; url?: string } | null;
 }
 
+/**
+ * 아직 카톡방에 안 나갔거나 실패한 발신 건.
+ *
+ * 성공한 것은 여기 없다 — 서버가 kakao_messages 로 옮겨 담아 일반 메시지로 내려준다.
+ * 그래서 이 목록은 "대기 중이거나 잘못된 것" 만 남고, 화면에서도 그렇게 보여야 한다.
+ */
+export interface InboxOutbound {
+  id: string;
+  roomId: string;
+  body: string;
+  authorName: string;
+  status: 'pending' | 'sending' | 'sent' | 'failed' | 'canceled';
+  attempts: number;
+  error: string | null;
+  createdAt: string;
+  sentAt: string | null;
+}
+
 export interface InboxViewData {
   rooms: InboxRoom[];
   messagesByRoom: Record<string, InboxMessage[]>;
+  outboundByRoom: Record<string, InboxOutbound[]>;
   staffLabel: string;
+  /** viewer 는 열람 전용이라 입력창 대신 안내문을 본다. */
+  canSend: boolean;
   /** 어느 거래처에도 연결되지 않아 본문을 저장하지 않은 방 수. */
   unmatchedCount: number;
 }
@@ -67,6 +88,10 @@ export function InboxView({ data }: { data: InboxViewData }) {
   const [rooms, setRooms] = useState(data.rooms);
   const [activeId, setActiveId] = useState<string | null>(data.rooms[0]?.id ?? null);
   const [messages, setMessages] = useState<Record<string, InboxMessage[]>>(data.messagesByRoom);
+  const [outbound, setOutbound] = useState<Record<string, InboxOutbound[]>>(data.outboundByRoom);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
@@ -83,6 +108,12 @@ export function InboxView({ data }: { data: InboxViewData }) {
 
   const active = rooms.find((r) => r.id === activeId) ?? null;
   const activeMessages = activeId ? messages[activeId] : undefined;
+  const activeOutbound = (activeId ? outbound[activeId] : undefined) ?? [];
+
+  // 대기 중인 발신이 있으면 폴링이 대화를 매 주기 다시 받아야 한다. 방 목록의 lastMessageAt
+  // 만 보면 "보냈는지" 가 안 바뀌고, 사람은 그 상태를 기다리며 화면을 보고 있다.
+  const pendingRef = useRef(false);
+  pendingRef.current = activeOutbound.some((o) => o.status === 'pending' || o.status === 'sending');
 
   const visibleRooms = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -107,12 +138,17 @@ export function InboxView({ data }: { data: InboxViewData }) {
     async (roomId: string) => {
       setActiveId(roomId);
       setColorOpen(false);
+      setSendError(null);
       if (messages[roomId]) return;
       setLoading(true);
       try {
         const res = await fetch(`/api/kakao/thread?roomId=${encodeURIComponent(roomId)}`);
-        const json = (await res.json()) as { messages?: InboxMessage[] };
+        const json = (await res.json()) as {
+          messages?: InboxMessage[];
+          outbound?: InboxOutbound[];
+        };
         setMessages((prev) => ({ ...prev, [roomId]: json.messages ?? [] }));
+        setOutbound((prev) => ({ ...prev, [roomId]: json.outbound ?? [] }));
       } catch {
         setMessages((prev) => ({ ...prev, [roomId]: [] }));
       } finally {
@@ -121,6 +157,53 @@ export function InboxView({ data }: { data: InboxViewData }) {
     },
     [messages],
   );
+
+  /** 보낼 것을 큐에 적는다. 여기서 카톡으로 나가지 않는다 — 봇이 가져가야 나간다. */
+  async function sendDraft() {
+    const roomId = activeId;
+    const text = draft.trim();
+    if (!roomId || !text || sending) return;
+
+    setSending(true);
+    setSendError(null);
+    try {
+      const res = await fetch('/api/kakao/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId, body: text }),
+      });
+      const json = (await res.json()) as { outbound?: InboxOutbound; error?: string };
+      if (!res.ok || !json.outbound) {
+        setSendError(json.error ?? '보내지 못했습니다');
+        return;
+      }
+      setOutbound((prev) => ({ ...prev, [roomId]: [...(prev[roomId] ?? []), json.outbound!] }));
+      setDraft('');
+    } catch {
+      setSendError('네트워크가 끊겼습니다');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function cancelOutbound(id: string) {
+    const roomId = activeId;
+    if (!roomId) return;
+    try {
+      const res = await fetch(`/api/kakao/send?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: string };
+        setSendError(json.error ?? '취소하지 못했습니다');
+        return;
+      }
+      setOutbound((prev) => ({
+        ...prev,
+        [roomId]: (prev[roomId] ?? []).filter((o) => o.id !== id),
+      }));
+    } catch {
+      setSendError('네트워크가 끊겼습니다');
+    }
+  }
 
   // 새 대화를 열면 맨 아래(최신)로. 카톡과 같은 읽기 시작점을 준다.
   useEffect(() => {
@@ -166,12 +249,19 @@ export function InboxView({ data }: { data: InboxViewData }) {
         if (!openId) return;
         const prevRoom = before.find((r) => r.id === openId);
         const nextRoom = next.find((r) => r.id === openId);
-        if (!nextRoom || prevRoom?.lastMessageAt === nextRoom.lastMessageAt) return;
+        if (!nextRoom) return;
+        const changed = prevRoom?.lastMessageAt !== nextRoom.lastMessageAt;
+        // 새 메시지가 없어도 발신 대기가 남아 있으면 받아온다 — 나갔는지를 사람이 기다리고 있다.
+        if (!changed && !pendingRef.current) return;
 
         const threadRes = await fetch(`/api/kakao/thread?roomId=${encodeURIComponent(openId)}`);
         if (!threadRes.ok || stopped) return;
-        const threadJson = (await threadRes.json()) as { messages?: InboxMessage[] };
+        const threadJson = (await threadRes.json()) as {
+          messages?: InboxMessage[];
+          outbound?: InboxOutbound[];
+        };
         setMessages((prev) => ({ ...prev, [openId]: threadJson.messages ?? [] }));
+        setOutbound((prev) => ({ ...prev, [openId]: threadJson.outbound ?? [] }));
       } catch {
         // 네트워크가 끊긴 것뿐이다. 다음 주기에 다시 시도한다.
       }
@@ -456,13 +546,49 @@ export function InboxView({ data }: { data: InboxViewData }) {
                 </div>
               ) : null}
               {renderMessages(activeMessages ?? [], data.staffLabel)}
+              {renderOutbound(activeOutbound, (id) => void cancelOutbound(id))}
             </div>
 
+            {sendError ? <div className="sendwarn">{sendError}</div> : null}
+
             <div className="cs-in">
-              <div className="guard">
-                <Ic id="i-lock" w={14} />
-                <span>읽기 전용이에요. 답장은 카카오톡에서 직접 보내주세요.</span>
-              </div>
+              {!data.canSend ? (
+                <div className="guard">
+                  <Ic id="i-lock" w={14} />
+                  <span>열람 권한이라 보낼 수 없어요. 답장은 카카오톡에서 직접 보내주세요.</span>
+                </div>
+              ) : !active.partnerId ? (
+                <div className="guard">
+                  <Ic id="i-lock" w={14} />
+                  <span>거래처에 연결되지 않은 방이에요. 카톡방에서 #등록 을 먼저 해주세요.</span>
+                </div>
+              ) : (
+                <div className="composer">
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter 전송, Shift+Enter 줄바꿈 — 카톡과 같은 손버릇.
+                      // 한글 조합 중(isComposing)에는 무시한다. 안 그러면 마지막 글자가 잘린 채 나간다.
+                      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                        e.preventDefault();
+                        void sendDraft();
+                      }
+                    }}
+                    placeholder={`${active.partnerName ?? active.roomName} 에게 보낼 내용 (Enter 전송 · Shift+Enter 줄바꿈)`}
+                    rows={1}
+                    maxLength={2000}
+                  />
+                  <button
+                    type="button"
+                    className="sendbtn"
+                    disabled={sending || !draft.trim()}
+                    onClick={() => void sendDraft()}
+                  >
+                    {sending ? '보내는 중…' : '보내기'}
+                  </button>
+                </div>
+              )}
             </div>
           </>
         ) : (
@@ -588,6 +714,42 @@ function renderMessages(messages: InboxMessage[], staffLabel: string) {
   }
 
   return out;
+}
+
+/**
+ * 아직 안 나간 발신 건을 대화 끝에 얹는다.
+ *
+ * 나간 것과 눈으로 구별돼야 한다. "보낸 줄 알았는데 안 갔다" 가 업무 카톡에서 제일 나쁘고,
+ * 이 앱은 서버가 카톡에 직접 말할 수 없어 그 간격이 실제로 존재한다(봇 폰이 꺼져 있으면 안 나간다).
+ */
+function renderOutbound(rows: InboxOutbound[], onCancel: (id: string) => void) {
+  if (rows.length === 0) return null;
+
+  return rows.map((o) => {
+    const failed = o.status === 'failed';
+    return (
+      <div key={o.id} className={`msg out pendingmsg${failed ? ' failedmsg' : ''}`}>
+        <span className="mav ghost" />
+        <div className="mbody">
+          <div className="who tiny">
+            <span className="tm">
+              {failed
+                ? `보내지 못했어요 (${o.attempts}회 시도)`
+                : o.status === 'sending'
+                  ? '보내는 중…'
+                  : '전송 대기'}
+            </span>
+          </div>
+          <div className="bubble">{o.body}</div>
+          <div className="obact">
+            <button type="button" className="obcancel" onClick={() => onCancel(o.id)}>
+              {failed ? '지우기' : '취소'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  });
 }
 
 // 아래 넷은 전부 서울 고정 포맷터를 쓴다. 로컬 타임존으로 렌더하면 서버(UTC)와 어긋나

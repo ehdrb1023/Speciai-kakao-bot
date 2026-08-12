@@ -5,6 +5,7 @@ import { escapeLikePattern } from './commands';
 
 export * from './rules';
 export * from './commands';
+export * from './outbound';
 
 // 거래처 카톡 수집 — 파싱·매칭·멱등·집계는 전부 결정론. AI 추론 없음.
 

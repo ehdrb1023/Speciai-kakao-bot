@@ -5,7 +5,7 @@ import { getSession, createSupabaseServerClient } from '@/lib/auth/server';
 import { canManageMembers } from '@/lib/auth';
 import { BRAND } from '@/lib/brand';
 import { MembersPanel, type MemberRow, type InvitationRow } from '@/lib/ui';
-import { listRooms, listRoomMessages, listUnmatchedRooms } from '@/server/kakao';
+import { listRooms, listRoomMessages, listRoomOutbound, listUnmatchedRooms } from '@/server/kakao';
 import { ConsoleShell } from '@/components/console/ConsoleShell';
 import { InboxView, type InboxViewData } from '@/components/console/views/InboxView';
 import {
@@ -19,6 +19,7 @@ import {
 } from '@/server/actions/partners';
 import { invite, changeRole, removeMember, cancelInvite } from '@/server/actions/members';
 import { saveStaffAliases } from '@/server/actions/workspace';
+import { signOut } from '@/server/actions/auth';
 
 // 받은 카톡만 static(기본 탭). 나머지는 탭별 코드분할 — 초기 청크에서 분리한다.
 const PartnersView = dynamic(() =>
@@ -69,9 +70,15 @@ export default async function Page() {
 
   // 첫 방의 대화만 미리 싣는다. 나머지는 클릭 시 /api/kakao/thread 로 지연 로드.
   const messagesByRoom: InboxViewData['messagesByRoom'] = {};
+  const outboundByRoom: InboxViewData['outboundByRoom'] = {};
   const firstRoom = rooms[0];
   if (firstRoom) {
-    messagesByRoom[firstRoom.id] = await listRoomMessages(sb, workspaceId, firstRoom.id);
+    const [msgs, out] = await Promise.all([
+      listRoomMessages(sb, workspaceId, firstRoom.id),
+      listRoomOutbound(sb, workspaceId, firstRoom.id),
+    ]);
+    messagesByRoom[firstRoom.id] = msgs;
+    outboundByRoom[firstRoom.id] = out;
   }
 
   const staffAliases = Array.isArray(ws?.staff_aliases)
@@ -92,7 +99,10 @@ export default async function Page() {
       messageCount: r.messageCount,
     })),
     messagesByRoom,
+    outboundByRoom,
     staffLabel: BRAND.staffLabel,
+    // viewer 는 열람 전용. 서버 라우트에서도 같은 판정을 하므로 여기 값은 화면 표시용이다.
+    canSend: session.role !== 'viewer',
     unmatchedCount: unmatched.length,
   };
 
@@ -127,6 +137,7 @@ export default async function Page() {
       userRole={roleLabel}
       badges={{ kakao: unhandled }}
       isAdmin={canEdit}
+      signOutAction={signOut}
       slots={{
         kakao: <InboxView data={inboxData} />,
         partners: (

@@ -75,13 +75,17 @@ export function PreviewConsole() {
         userRole="대표 · 소유자"
         badges={{ kakao: PREVIEW_ROOMS.filter((r) => !r.handled).length }}
         isAdmin
+        // 미리보기는 세션이 없다. 로그아웃할 것도 없으니 아무것도 하지 않는다.
+        signOutAction={async () => {}}
         slots={{
           kakao: (
             <InboxView
               data={{
                 rooms: PREVIEW_ROOMS,
                 messagesByRoom: PREVIEW_MESSAGES,
+                outboundByRoom: {},
                 staffLabel: BRAND.staffLabel,
+                canSend: true,
                 unmatchedCount: PREVIEW_UNMATCHED.length,
               }}
             />

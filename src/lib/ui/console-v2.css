@@ -53,6 +53,10 @@
   .cv2-user .tx b{display:block;font-size:13px;font-weight:800;line-height:1.2}
   .cv2-user .tx span{font-size:10.5px;color:var(--mut);font-weight:700}
   .cv2-user .av{width:34px;height:34px;border-radius:10px;background:var(--bluebg);color:var(--blue);display:grid;place-items:center;font-size:13px;font-weight:800;flex:none}
+  .cv2-logout{width:34px;height:34px;border-radius:10px;background:var(--soft2);color:var(--ink3);display:grid;place-items:center;flex:none;transition:color .15s,background .15s}
+  .cv2-logout:hover{background:#E2E6EC;color:var(--ink)}
+  .cv2-logout:disabled{opacity:.45;cursor:default}
+  .cv2-logout svg{width:16px;height:16px}
 
   .cv2-main{flex:1}
   .cv2-main .inner{max-width:none;margin:0;padding:28px clamp(14px,2vw,28px) 40px}
@@ -431,6 +435,22 @@
   .console-v2 .cs-in .guard.picked svg{color:var(--blue)}
   .console-v2 .cs-in .guard .clearpick{margin-left:auto;font-size:11px;font-weight:800;color:var(--blue);text-decoration:underline;flex:none}
   .console-v2 .cs-in .guard span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 발신 입력창 — 여기서 쓴 것은 큐에 적힐 뿐이고, 봇 폰이 가져가야 실제로 나간다. */
+  .console-v2 .composer{display:flex;gap:8px;flex:1;align-items:flex-end;min-width:0}
+  .console-v2 .composer textarea{flex:1;min-width:0;background:var(--soft);border-radius:10px;padding:11px 13px;font-size:13px;line-height:1.5;resize:none;max-height:120px;min-height:42px}
+  .console-v2 .composer textarea::placeholder{color:var(--mut);font-weight:600}
+  .console-v2 .sendbtn{flex:none;height:42px;padding:0 18px;border-radius:10px;background:#FEE500;color:#1A1A1A;font-size:12.5px;font-weight:800;transition:filter .12s,opacity .12s}
+  .console-v2 .sendbtn:hover:not(:disabled){filter:brightness(.95)}
+  .console-v2 .sendbtn:disabled{opacity:.45;cursor:default}
+  .console-v2 .sendwarn{padding:8px 14px;background:#FFF1F2;color:#B42318;font-size:11.5px;font-weight:700}
+  /* 대기·실패 말풍선 — 나간 것과 눈으로 구별돼야 한다. 흐리게 두고 상태를 글자로 적는다. */
+  .console-v2 .msg.pendingmsg .bubble{background:#FFF7C2;color:rgba(26,26,26,.7);box-shadow:inset 0 0 0 1.5px rgba(0,0,0,.08)}
+  .console-v2 .msg.failedmsg .bubble{background:#FFF1F2;color:#B42318;box-shadow:inset 0 0 0 1.5px rgba(180,35,24,.25)}
+  .console-v2 .msg.pendingmsg .who .tm{font-weight:800;color:#8A6D00}
+  .console-v2 .msg.failedmsg .who .tm{font-weight:800;color:#B42318}
+  .console-v2 .obact{margin-top:4px;text-align:right}
+  .console-v2 .obcancel{font-size:10.5px;font-weight:700;color:rgba(43,58,74,.6);text-decoration:underline}
+  .console-v2 .obcancel:hover{color:#D64550}
   .console-v2 .cs-right{display:flex;flex-direction:column;gap:12px;padding:14px;overflow:auto}
   /* 우측 탭 — 답변 초안 / 자료 / 최근 내역 */
   .console-v2 .rtabs{display:grid;grid-template-columns:1fr 1fr 1fr;background:var(--soft2);border-radius:10px;padding:3px;gap:3px;flex:none}

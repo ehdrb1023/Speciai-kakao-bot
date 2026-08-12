@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { getServerClient } from '@/lib/db';
 import {
   bindRoomToPartner,
+  claimOutbound,
   ingestBotMessage,
   matchRoomForWorkspace,
   normalizeRoomName,
@@ -108,7 +109,19 @@ export async function POST(req: Request) {
     meta: { inserted: result.inserted, skipped: result.skipped, room: body.room },
   });
 
-  return NextResponse.json({ ok: true, inserted: result.inserted, skipped: result.skipped });
+  // 이 방으로 나갈 것이 밀려 있으면 응답에 얹어 보낸다. 거래처가 방금 말한 직후라
+  // 그 방의 알림 세션이 가장 확실히 살아 있는 순간이고, 봇이 따로 물어볼 때까지
+  // 기다리지 않아도 된다. 결과는 봇이 다음 outbox 호출에서 알려준다.
+  const outbox = result.roomId
+    ? await claimOutbound(sb, workspaceId, { roomId: result.roomId, limit: 5 })
+    : [];
+
+  return NextResponse.json({
+    ok: true,
+    inserted: result.inserted,
+    skipped: result.skipped,
+    outbox,
+  });
 }
 
 /**
