@@ -92,7 +92,23 @@ var RULES_CACHE_FILE = 'sq-kakao-rules.json'; // 앱 재시작 후에도 규칙�
 
 // 대시보드 발신. false 로 두면 이 봇은 예전처럼 읽기만 한다.
 var OUTBOX_ENABLED = true;
-var OUTBOX_POLL_MS = 15000;    // "보낼 것 있나" 를 물어보는 주기
+
+/**
+ * "보낼 것 있나" 를 물어보는 주기. 두 단계다.
+ *
+ * 15초로 하루 종일 돌면 월 17만 번 서버를 깨운다. 서버리스는 깨운 횟수로 돈을 받으므로
+ * 그게 그대로 요금이 된다(실측 2026-08-12: Vercel 사용량 초과로 프로젝트가 402 로 멈췄다).
+ * 대시보드에서 실제로 글을 쓰는 건 하루 몇 번인데 폰 한 대가 17만 번을 두드렸다.
+ *
+ * 그래서 조용하면 느리게 간다. 급할 일이 없다 —
+ *   · 거래처가 방금 말한 방으로 나갈 것은 **인입 응답에 얹혀** 곧바로 온다(폴링과 무관).
+ *   · 폴링이 필요한 경우는 "방이 조용한데 대시보드에서 먼저 말을 거는" 때뿐이다.
+ * 최근에 무슨 일이 있었으면 빠르게(ACTIVE), 아니면 느리게(IDLE) 돈다.
+ * 요금이 더 걱정되면 IDLE 을 늘려라 — 늘린 만큼 첫 발신이 늦게 나갈 뿐이다.
+ */
+var OUTBOX_POLL_MS = 15000;          // 활동 직후 주기
+var OUTBOX_IDLE_POLL_MS = 60000;     // 조용할 때 주기
+var OUTBOX_ACTIVE_WINDOW_MS = 300000; // 이 시간 안에 활동이 있었으면 "활동 중"
 
 // 알림에 뭐가 실려오는지 매번 로그로 남긴다. 방 제목 복원이 안 될 때 원인을 보려는 것이라
 // 확인이 끝나면 false 로 되돌린다(로그가 계속 쌓인다). 본문은 길이만 남는다.
@@ -679,9 +695,17 @@ function _outboxNoteFailure(code) {
   _outboxLastCode = code;
 }
 
-/** 다음 폴링까지 기다릴 시간. 실패가 쌓일수록 두 배씩, 10분에서 멈춘다. */
+/** 방금 무슨 일이 있었다고 표시한다 — 메시지 수신·발신 건 수령. 폴링을 잠깐 빠르게 돌린다. */
+var _lastActivityAt = 0;
+function noteActivity() { _lastActivityAt = _now(); }
+
+/**
+ * 다음 폴링까지 기다릴 시간.
+ * 조용하면 느리게(요금), 활동 직후면 빠르게(응답성), 실패가 쌓이면 두 배씩(서버 배려).
+ */
 function outboxDelayMs() {
-  var delay = OUTBOX_POLL_MS;
+  var active = (_now() - _lastActivityAt) < OUTBOX_ACTIVE_WINDOW_MS;
+  var delay = active ? OUTBOX_POLL_MS : OUTBOX_IDLE_POLL_MS;
   for (var i = 0; i < _outboxFailStreak && delay < OUTBOX_MAX_BACKOFF_MS; i++) delay *= 2;
   return (delay > OUTBOX_MAX_BACKOFF_MS) ? OUTBOX_MAX_BACKOFF_MS : delay;
 }
@@ -737,7 +761,9 @@ function outboxPost(acks) {
     reader.close();
 
     var obj = JSON.parse(body);
-    return (obj && obj.outbox) ? obj.outbox : [];
+    var jobs = (obj && obj.outbox) ? obj.outbox : [];
+    if (jobs.length) noteActivity();
+    return jobs;
   } catch (e) {
     _outboxNoteFailure(0);
     Log.e('kakao-bot[발신] 조회 예외: ' + e);
@@ -1036,6 +1062,7 @@ function postPayload(obj) {
     if (code >= 200 && code < 300) {
       // 이 방으로 나갈 것이 응답에 실려 왔으면 받아둔다. 여기서 바로 보내지 않는 이유는
       // 발신 간격(4초+)만큼 수집이 멈추기 때문이다. 발신 루프가 집어간다.
+      noteActivity();
       takeOutboxFrom(body);
       return { ok: true, body: body };
     }
@@ -1774,7 +1801,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12p DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12q DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
