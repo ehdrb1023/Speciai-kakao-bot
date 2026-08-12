@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { getServerClient } from '@/lib/db';
-import { loadRules, resolveBotWorkspaceId, sortRules } from '@/server/kakao';
+import { loadRules, resolveBotWorkspace, sortRules } from '@/server/kakao';
 import { ingestTokenValid } from '@/server/kakao/ingest-token';
 
 // 봇 단말이 내려받는 방 필터 규칙.
@@ -21,13 +21,12 @@ export async function GET(req: Request) {
   }
 
   const sb = getServerClient();
-  const workspaceId = await resolveBotWorkspaceId(sb);
-  if (!workspaceId) {
-    return NextResponse.json(
-      { error: 'KAKAO_WORKSPACE_ID 가 설정되지 않았습니다' },
-      { status: 503 },
-    );
+  const ws = await resolveBotWorkspace(sb);
+  if (!ws.workspaceId) {
+    console.error('[kakao] 규칙 배포 거부 —', ws.reason);
+    return NextResponse.json({ error: ws.reason ?? '워크스페이스를 정할 수 없습니다' }, { status: 503 });
   }
+  const workspaceId = ws.workspaceId;
 
   const rules = sortRules(await loadRules(sb, workspaceId)).map((r) => ({
     kind: r.kind,

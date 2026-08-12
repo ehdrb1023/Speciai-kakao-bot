@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { ackOutbound, claimOutbound, resolveBotWorkspaceId } from '@/server/kakao';
+import { ackOutbound, claimOutbound, resolveBotWorkspace } from '@/server/kakao';
 import { getServerClient } from '@/lib/db';
 import { ingestTokenValid } from '@/server/kakao/ingest-token';
 import { logAuditMachine } from '@/server/audit';
@@ -26,10 +26,12 @@ export async function POST(req: Request) {
   } | null;
 
   const sb = getServerClient();
-  const workspaceId = await resolveBotWorkspaceId(sb);
-  if (!workspaceId) {
-    return NextResponse.json({ error: 'KAKAO_WORKSPACE_ID 가 설정되지 않았습니다' }, { status: 503 });
+  const ws = await resolveBotWorkspace(sb);
+  if (!ws.workspaceId) {
+    console.error('[kakao] 발신 조회 거부 —', ws.reason);
+    return NextResponse.json({ error: ws.reason ?? '워크스페이스를 정할 수 없습니다' }, { status: 503 });
   }
+  const workspaceId = ws.workspaceId;
 
   const acks = (body?.acks ?? [])
     .filter((a): a is { id: string; ok?: boolean; error?: string } => typeof a?.id === 'string')

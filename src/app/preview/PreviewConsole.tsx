@@ -110,6 +110,8 @@ export function PreviewConsole() {
               status={{
                 ingestTokenConfigured: false,
                 workspaceIdConfigured: false,
+              workspaceIdMismatch: false,
+              expectedWorkspaceId: '00000000-0000-0000-0000-000000000000',
                 appUrl: typeof window === 'undefined' ? '' : window.location.origin,
                 linkedRoomCount: PREVIEW_PARTNERS.reduce((sum, p) => sum + p.rooms.length, 0),
                 roomCount: PREVIEW_ROOMS.length,

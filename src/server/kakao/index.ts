@@ -40,23 +40,60 @@ export interface UnmatchedRoomRow {
   lastSeenAt: string;
 }
 
+export interface BotWorkspaceResult {
+  workspaceId: string | null;
+  /** 사람이 읽고 바로 고칠 수 있는 실패 사유. 봇 로그에 그대로 실려 나간다. */
+  reason?: string;
+}
+
 /**
  * 봇이 먹일 워크스페이스. 봇은 로그인 세션이 없어 워크스페이스를 스스로 모른다.
  * KAKAO_WORKSPACE_ID 를 명시하는 것이 정석이고, 미설정이면 워크스페이스가 딱 하나일 때만
- * 그것으로 폴백한다(1인 사무실 초기 세팅 편의). 둘 이상이면 null 을 돌려 인입을 막는다 —
+ * 그것으로 폴백한다(1인 사무실 초기 세팅 편의). 둘 이상이면 인입을 막는다 —
  * 엉뚱한 워크스페이스에 거래처 대화를 쌓는 것보다 안 받는 편이 낫다.
+ *
+ * ⚠️ env 값이 **실재하는지 반드시 확인한다.** 예전에는 값이 있으면 그대로 썼는데,
+ * 2026-08-12 에 Vercel 프로젝트가 바뀌면서 지워진 워크스페이스의 ID 가 남아 있었다.
+ * 봇은 200 OK 를 받고, 서버는 그 유령 워크스페이스에 계속 쌓고, 화면에는 아무것도 안 뜬다.
+ * 하루를 봇 코드에서 원인을 찾다 날렸다. 조용히 성공하는 실패가 제일 비싸다.
+ *
+ * 실재하지 않아도 **폴백하지 않는다.** 명시된 설정을 서버가 마음대로 다른 곳으로 바꾸면
+ * 그건 또 다른 "엉뚱한 곳에 쌓기" 다. 받지 않고 이유를 크게 알린다.
  */
-export async function resolveBotWorkspaceId(sb: SupabaseClient): Promise<string | null> {
-  const fromEnv = process.env.KAKAO_WORKSPACE_ID?.trim();
-  if (fromEnv) return fromEnv;
-
-  const { data, error } = await sb.from('workspaces').select('id').limit(2);
+export async function resolveBotWorkspace(sb: SupabaseClient): Promise<BotWorkspaceResult> {
+  const { data, error } = await sb.from('workspaces').select('id').limit(50);
   if (error) {
     console.error('[kakao] workspace 조회 실패', error.message);
-    return null;
+    return { workspaceId: null, reason: 'workspaces 조회에 실패했습니다' };
   }
-  if (!data || data.length !== 1) return null;
-  return data[0]!.id as string;
+  const ids = (data ?? []).map((r) => r.id as string);
+
+  const fromEnv = process.env.KAKAO_WORKSPACE_ID?.trim();
+  if (fromEnv) {
+    if (ids.includes(fromEnv)) return { workspaceId: fromEnv };
+    return {
+      workspaceId: null,
+      reason:
+        `KAKAO_WORKSPACE_ID(${fromEnv}) 에 해당하는 워크스페이스가 없습니다. ` +
+        (ids.length === 1
+          ? `이 DB 의 워크스페이스는 ${ids[0]} 하나뿐입니다 — 배포 환경변수를 이 값으로 고치세요.`
+          : `이 DB 에 워크스페이스가 ${ids.length}개 있습니다.`),
+    };
+  }
+
+  if (ids.length === 1) return { workspaceId: ids[0]! };
+  return {
+    workspaceId: null,
+    reason:
+      ids.length === 0
+        ? '워크스페이스가 하나도 없습니다'
+        : `워크스페이스가 ${ids.length}개라 어디에 쌓을지 알 수 없습니다. KAKAO_WORKSPACE_ID 를 지정하세요.`,
+  };
+}
+
+/** 하위호환 — 실패 사유가 필요 없는 곳에서 쓴다. */
+export async function resolveBotWorkspaceId(sb: SupabaseClient): Promise<string | null> {
+  return (await resolveBotWorkspace(sb)).workspaceId;
 }
 
 /** 활성 매칭 규칙 전부. 봇 선필터·서버 매칭이 같은 목록을 본다. */

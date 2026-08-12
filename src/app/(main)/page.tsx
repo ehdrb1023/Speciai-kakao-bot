@@ -165,7 +165,17 @@ export default async function Page() {
             status={{
               // 토큰 실제 값은 클라이언트로 내리지 않는다. 설정 여부만 전달.
               ingestTokenConfigured: !!process.env.KAKAO_INGEST_TOKEN,
-              workspaceIdConfigured: !!process.env.KAKAO_WORKSPACE_ID,
+              // 값이 있는지가 아니라 **지금 보고 있는 이 워크스페이스를 가리키는지**를 본다.
+              // 값만 확인하던 시절, 지워진 워크스페이스의 ID 가 남아 있는데도 "완료" 로 떠서
+              // 봇이 올린 것이 전부 유령 워크스페이스로 갔다(2026-08-12). 화면이 거짓말을 하면
+              // 원인을 엉뚱한 데서 찾게 된다 — 그게 제일 비싼 실패다.
+              workspaceIdConfigured:
+                !process.env.KAKAO_WORKSPACE_ID ||
+                process.env.KAKAO_WORKSPACE_ID.trim() === session.workspaceId,
+              workspaceIdMismatch:
+                !!process.env.KAKAO_WORKSPACE_ID &&
+                process.env.KAKAO_WORKSPACE_ID.trim() !== session.workspaceId,
+              expectedWorkspaceId: session.workspaceId,
               appUrl: process.env.NEXT_PUBLIC_APP_URL ?? '',
               linkedRoomCount,
               roomCount: rooms.length,

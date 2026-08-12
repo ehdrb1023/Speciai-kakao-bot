@@ -9,7 +9,7 @@ import {
   normalizeRoomName,
   parseRoomCommand,
   recordUnmatchedRoom,
-  resolveBotWorkspaceId,
+  resolveBotWorkspace,
   roomKeyOf,
   unbindRoom,
 } from '@/server/kakao';
@@ -57,14 +57,14 @@ export async function POST(req: Request) {
   }
 
   const sb = getServerClient();
-  const workspaceId = await resolveBotWorkspaceId(sb);
-  if (!workspaceId) {
+  const ws = await resolveBotWorkspace(sb);
+  if (!ws.workspaceId) {
     // 어디에 쌓을지 모르는 상태로 받아두면 되돌리기 어렵다. 받지 않는 편이 낫다.
-    return NextResponse.json(
-      { error: 'KAKAO_WORKSPACE_ID 가 설정되지 않았습니다' },
-      { status: 503 },
-    );
+    // 사유를 본문에 실어야 봇 로그(`kakao-bot POST 503 {...}`)에서 바로 보인다.
+    console.error('[kakao] 인입 거부 —', ws.reason);
+    return NextResponse.json({ error: ws.reason ?? '워크스페이스를 정할 수 없습니다' }, { status: 503 });
   }
+  const workspaceId = ws.workspaceId;
 
   // 방 등록/해제 명령은 메시지가 아니다. 매칭·저장 어느 쪽도 타지 않고 여기서 끝난다.
   const command = parseRoomCommand(body.text ?? '');

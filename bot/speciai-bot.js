@@ -1553,8 +1553,11 @@ function handleKakaoNoti(sbn) {
     var isGroup = notiIsGroup(ex) || !!gs('android.conversationTitle');
 
     var msgSender = notiSenderOf(ex);
-    // 1:1 알림에는 messages 가 없는 단말이 있다. 그때 발신자는 상대, 즉 title 이다.
-    var sender = msgSender || (isGroup ? '' : ntitle);
+    // messages 가 안 실린 알림(축약·갱신 알림)이 있다. 그때는 title 을 발신자로 본다 —
+    // 이 단말의 알림은 (발신자 + 내용) 형식이라 title 이 곧 발신자다(실측 2026-08-12).
+    // 예전에는 단톡방이면 빈 값으로 뒀는데, 그러면 발신자가 없다고 판단해 그 메시지를
+    // 통째로 버렸다. 방을 찾아놓고도 못 올리는 구멍이었다.
+    var sender = msgSender || ntitle;
     var notiBody = notiTextOf(ex) || gs('android.bigText') || gs('android.text');
     var msgAt = notiTimeOf(ex);
     var roomKey = notiRoomKeyOf(sbn, ex);
@@ -1625,12 +1628,23 @@ function handleKakaoNoti(sbn) {
 
     _rememberNoti(sender, roomToSave, notiBody, notiImage);
 
-    if (NOTI_INGEST && roomToSave && sender) {
-      // 카톡은 같은 알림을 다시 올린다. 메시지 자신의 시각이 한참 지난 것이면 이미 처리한
-      // 메시지의 재게시로 본다 — 안 그러면 재게시마다 새 ts 가 붙어 서버에 중복 저장된다.
-      if (msgAt && (_now() - msgAt) > NOTI_STALE_MS) {
-        if (NOTI_DEBUG) Log.i('kakao-bot[NOTI] 재게시로 판단 — 수집 생략');
+    // 안 올리기로 했으면 **왜** 안 올리는지를 남긴다. 여기서 조용히 빠져나가면
+    // 대시보드는 "수집된 방 0" 인데 로그에는 아무 단서도 없다(2026-08-12 에 그랬다).
+    if (NOTI_INGEST) {
+      if (!roomToSave) {
+        Log.e('kakao-bot[NOTI] 수집 생략 — 방을 특정 못 함. ' + notiIdentityLog(sbn, ex));
+      } else if (!sender) {
+        Log.e('kakao-bot[NOTI] 수집 생략 — 발신자를 못 읽음 room="' + roomToSave + '"');
+      } else if (!trimText(notiBody) && !notiImage) {
+        Log.e('kakao-bot[NOTI] 수집 생략 — 본문이 비었다 room="' + roomToSave
+          + '". 카톡·안드로이드 알림 설정에서 내용 미리보기가 꺼져 있으면 이렇게 된다.');
+      } else if (msgAt && (_now() - msgAt) > NOTI_STALE_MS) {
+        // 카톡은 같은 알림을 다시 올린다. 메시지 자신의 시각이 한참 지난 것이면 이미 처리한
+        // 메시지의 재게시로 본다 — 안 그러면 재게시마다 새 ts 가 붙어 중복 저장된다.
+        Log.i('kakao-bot[NOTI] 수집 생략 — 재게시(메시지 시각이 '
+          + Math.round((_now() - msgAt) / 1000) + '초 전)');
       } else {
+        Log.i('kakao-bot[NOTI] 수집 시도 room="' + roomToSave + '"');
         ingestFromNoti(roomToSave, notiBody, sender, isGroup, notiImage,
           msgAt ? isoFromMillis(msgAt) : '');
       }
@@ -1671,7 +1685,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12j DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12k DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);

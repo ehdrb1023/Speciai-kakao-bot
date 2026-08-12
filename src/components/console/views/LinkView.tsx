@@ -10,6 +10,9 @@ import { seoulFull } from '@/lib/time';
 export interface LinkStatus {
   ingestTokenConfigured: boolean;
   workspaceIdConfigured: boolean;
+  /** env 의 KAKAO_WORKSPACE_ID 가 지금 이 워크스페이스가 아니다 — 봇이 올린 것이 여기 안 뜬다. */
+  workspaceIdMismatch: boolean;
+  expectedWorkspaceId: string;
   appUrl: string;
   /** "#등록" 으로 거래처에 붙은 방 수. 0 이면 봇이 모든 방을 걸러낸다. */
   linkedRoomCount: number;
@@ -43,6 +46,24 @@ export function LinkView({ status }: { status: LinkStatus }) {
         </div>
       </div>
 
+      {status.workspaceIdMismatch ? (
+        <div className="card" style={{ marginBottom: 14, borderColor: 'var(--rd, #e5484d)' }}>
+          <div className="sh" style={{ marginBottom: 10 }}>
+            <Ic id="i-flag" w={15} />
+            <b>배포 환경변수가 다른 워크스페이스를 가리킵니다</b>
+          </div>
+          <div className="fhint" style={{ fontSize: 12.5, lineHeight: 1.8 }}>
+            봇이 보낸 메시지는 서버에 <b>정상적으로 도착하지만</b>, 이 화면이 보는 곳이 아닌 다른
+            워크스페이스에 쌓입니다. 봇 로그에는 <code>POST 200</code> 만 찍히고 여기는 계속
+            비어 보입니다. 배포 환경변수를 아래 값으로 고치고 <b>재배포</b>하세요.
+            <div className="fld" style={{ marginTop: 10, marginBottom: 0 }}>
+              <label htmlFor="ws-id">KAKAO_WORKSPACE_ID</label>
+              <input id="ws-id" className="tin" readOnly value={status.expectedWorkspaceId} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="sh" style={{ marginBottom: 12 }}>
           <Ic id="i-shield" w={15} />
@@ -53,7 +74,11 @@ export function LinkView({ status }: { status: LinkStatus }) {
           <StatusLine
             ok={status.workspaceIdConfigured}
             label="KAKAO_WORKSPACE_ID 설정"
-            hint="봇이 보낸 메시지를 어느 워크스페이스에 쌓을지"
+            hint={
+              status.workspaceIdMismatch
+                ? '이 화면과 다른 워크스페이스를 가리키고 있습니다 — 봇이 올린 것이 여기 안 뜹니다'
+                : '봇이 보낸 메시지를 어느 워크스페이스에 쌓을지'
+            }
           />
           <StatusLine
             ok={status.linkedRoomCount > 0}
