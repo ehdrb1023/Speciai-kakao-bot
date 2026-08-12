@@ -82,7 +82,9 @@
 | `GET api/kakao/bot/rules` | `X-Ingest-Token` | 봇이 받아갈 방 필터 규칙 |
 | `POST api/kakao/bot/outbox` | `X-Ingest-Token` | 발신 결과 보고 + 보낼 것 수령 |
 
-둘 다 세션이 없어 service-role 클라이언트로 RLS 를 우회한다.
+셋 다 세션이 없어 service-role 클라이언트로 RLS 를 우회한다.
+**봇 라우트를 새로 만들면 `src/lib/auth/middleware.ts` 의 `PUBLIC_PATHS` 에 반드시 추가할 것** —
+빠뜨리면 미들웨어가 로그인 화면으로 307 리다이렉트하고, 봇은 HTML 을 받아 조용히 실패한다.
 워크스페이스는 `KAKAO_WORKSPACE_ID` 로 지정한다(`resolveBotWorkspaceId`).
 미설정이면 워크스페이스가 정확히 하나일 때만 폴백하고, 둘 이상이면 **인입을 거부한다** —
 엉뚱한 곳에 거래처 대화를 쌓는 것보다 안 받는 편이 낫다.

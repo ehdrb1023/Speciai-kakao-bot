@@ -9,6 +9,7 @@ const PUBLIC_PATHS = [
   '/onboarding',
   '/api/kakao/bot/ingest', // 온디바이스 봇 인입 (자체 X-Ingest-Token 검증)
   '/api/kakao/bot/rules', // 봇 방 필터 규칙 배포 (자체 X-Ingest-Token 검증)
+  '/api/kakao/bot/outbox', // 봇 발신 수령·결과 보고 (자체 X-Ingest-Token 검증)
   '/preview', // 목업 데이터 UI 확인 (로그인 없이. 프로덕션에서는 페이지가 스스로 404)
   '/_next',
   '/favicon',
