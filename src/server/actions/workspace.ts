@@ -144,12 +144,18 @@ async function reclassifySides(
       const chunk = list.slice(i, i + SPEAKER_CHUNK);
       if (chunk.length === 0) continue;
       // 이미 맞는 행은 건드리지 않는다 — updated_at 도 없는 테이블이라 의미 없는 쓰기다.
+      //
+      // 대시보드에서 보낸 것(content_hash = 'out:<id>')은 제외한다. 그건 우리가 쓴 글이라는
+      // 사실이 확정된 행이고, 별칭 목록으로 다시 판정할 대상이 아니다. 실제로 별칭을 비우자
+      // 우리가 보낸 메시지가 전부 거래처 발화로 뒤집혔다(2026-08-12). 발화자명은 담당자
+      // 계정 이름이지 카톡 닉네임이 아니라서, 별칭 목록에 있을 이유가 없다.
       const { data, error } = await sb
         .from('kakao_messages')
         .update({ side })
         .eq('workspace_id', workspaceId)
         .in('speaker', chunk)
         .neq('side', side)
+        .not('content_hash', 'like', 'out:%')
         .select('id');
       if (error) {
         console.error('[workspace] side 재판정 실패', error.message);
