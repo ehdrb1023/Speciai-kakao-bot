@@ -1727,6 +1727,11 @@ function handleKakaoNoti(sbn) {
         // 메시지의 재게시로 본다 — 안 그러면 재게시마다 새 ts 가 붙어 중복 저장된다.
         Log.i('kakao-bot[NOTI] 수집 생략 — 재게시(메시지 시각이 '
           + Math.round((_now() - msgAt) / 1000) + '초 전)');
+      } else if (trimText(notiBody) === PROBE_CMD) {
+        // 전송 확인은 서버로 안 간다. "수집 시도" 로 찍으면 뒤따르는 POST 줄이 없어서
+        // 전송이 실패한 것처럼 보인다 — 로그가 헷갈리면 원인을 엉뚱한 데서 찾는다.
+        Log.i('kakao-bot[NOTI] 전송 확인 명령 — 서버로 보내지 않는다');
+        ingestFromNoti(roomToSave, notiBody, sender, isGroup, null, '');
       } else {
         Log.i('kakao-bot[NOTI] 수집 시도 room="' + roomToSave + '"');
         ingestFromNoti(roomToSave, notiBody, sender, isGroup, notiImage,
@@ -1769,7 +1774,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12o DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12p DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
