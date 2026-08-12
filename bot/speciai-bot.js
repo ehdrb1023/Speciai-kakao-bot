@@ -125,6 +125,19 @@ function rulesCachePath() {
 function _now() { return java.lang.System.currentTimeMillis(); }
 
 /**
+ * HTTP 실패 코드를 사람이 바로 고칠 수 있는 문장으로. 인입·규칙·발신 세 곳이 같이 쓴다.
+ * 코드 숫자만 찍으면 로그를 보고도 무엇을 해야 할지 모른다 — 그러면 원인을 엉뚱한 데서 찾는다.
+ */
+function httpFailHint(code) {
+  if (code === 402) return ' — 배포가 중단돼 있다(Vercel 결제·사용량 한도). 서버를 다시 켜야 한다';
+  if (code === 401) return ' — 토큰이 서버 KAKAO_INGEST_TOKEN 과 다르다';
+  if (code === 404) return ' — 주소가 틀렸다(ENDPOINT·RULES_ENDPOINT 확인)';
+  if (code === 503) return ' — 서버가 워크스페이스를 정하지 못했다(KAKAO_WORKSPACE_ID)';
+  if (code === 0) return ' — 서버에 닿지 못했다(네트워크·도메인)';
+  return '';
+}
+
+/**
  * 지금 시각을 ISO 8601(UTC)로. Rhino 의 Date#toISOString 유무가 버전마다 달라
  * Java 포맷터를 먼저 쓴다. 타임존을 UTC 로 고정하고 'Z' 를 직접 붙이는 이유는
  * SimpleDateFormat 의 Z 패턴이 "+0900" 을 내놓아 서버 파싱이 애매해지기 때문이다.
@@ -249,7 +262,8 @@ function refreshRules(force) {
 
     var code = conn.getResponseCode();
     if (code !== 200) {
-      Log.e('kakao-bot: 규칙 조회 실패 code=' + code);
+      Log.e('kakao-bot: 규칙 조회 실패 code=' + code + httpFailHint(code)
+        + ' · 다음 시도는 ' + (RULES_REFRESH_MS / 60000) + '분 뒤');
       return;
     }
     var reader = new java.io.BufferedReader(
@@ -658,12 +672,7 @@ function _outboxNoteFailure(code) {
   _outboxFailStreak++;
   // 같은 코드가 반복되면 로그를 도배하지 않는다. 처음과 10회마다만 남긴다.
   if (code !== _outboxLastCode || _outboxFailStreak % 10 === 1) {
-    var why = '';
-    if (code === 402) why = ' — 배포가 중단된 상태다(Vercel 결제·사용량 한도). 서버를 다시 켜야 한다';
-    else if (code === 401) why = ' — 토큰이 서버 KAKAO_INGEST_TOKEN 과 다르다';
-    else if (code === 503) why = ' — 서버가 워크스페이스를 정하지 못했다(KAKAO_WORKSPACE_ID)';
-    else if (code === 0) why = ' — 서버에 닿지 못했다(네트워크·도메인)';
-    Log.e('kakao-bot[발신] 조회 실패 code=' + code + why
+    Log.e('kakao-bot[발신] 조회 실패 code=' + code + httpFailHint(code)
       + ' · 연속 ' + _outboxFailStreak + '회, 다음 시도 ' + Math.round(outboxDelayMs() / 1000) + '초 뒤');
   }
   _outboxLastCode = code;
@@ -1025,11 +1034,11 @@ function postPayload(obj) {
       return { ok: true, body: body };
     }
     if (code >= 400 && code < 500 && code !== 429 && code !== 402) {
-      Log.e('kakao-bot POST 영구실패 code=' + code + ' — 재시도하지 않음');
+      Log.e('kakao-bot POST 영구실패 code=' + code + httpFailHint(code) + ' — 재시도하지 않음');
       return { ok: false, retry: false, body: body };
     }
     if (code === 402) {
-      Log.e('kakao-bot POST 402 — 배포가 중단돼 있다(Vercel 결제·사용량 한도). 큐에 넣고 기다린다');
+      Log.e('kakao-bot POST 402' + httpFailHint(402) + '. 큐에 넣고 기다린다');
     }
     return { ok: false, retry: true, body: body };
   } catch (e) {
@@ -1754,7 +1763,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12m DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12n DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
