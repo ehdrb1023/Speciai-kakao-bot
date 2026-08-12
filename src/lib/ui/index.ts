@@ -34,6 +34,6 @@ export {
   type Column,
   type WizardStep,
 } from './components/Primitives';
-export { SignInForm } from './components/AuthForms';
+export { SignInForm, NewPasswordForm } from './components/AuthForms';
 export { MembersPanel, type MemberRow, type InvitationRow } from './components/MembersPanel';
 export * from './components/Icons';

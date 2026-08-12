@@ -65,6 +65,44 @@ export async function signUpWithEmail(email: string, password: string) {
   return { ok: true };
 }
 
+// 비밀번호 재설정 메일 발송.
+// 가입 안 된 이메일이어도 성공과 같은 응답을 준다 — 응답이 갈리면 어떤 이메일이
+// 가입돼 있는지 확인하는 통로가 된다(user enumeration).
+export async function requestPasswordReset(email: string) {
+  const sb = createSupabaseServerClient(await cookies());
+  const origin = await getOrigin();
+  // 메일 링크는 code 를 달고 /auth/callback 으로 온다. 세션을 심은 뒤 재설정 폼으로 넘긴다.
+  const { error } = await sb.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+    redirectTo: `${origin}/auth/callback?next=${encodeURIComponent('/auth/new-password')}`,
+  });
+  // 레이트리밋만은 알려준다. 안 그러면 "보냈다는데 안 온다" 로 오해한다.
+  if (error && /rate limit|seconds|too many/i.test(error.message)) {
+    return { error: '요청이 너무 잦습니다. 잠시 후 다시 시도해 주세요.' };
+  }
+  return { ok: true };
+}
+
+// 재설정 링크로 들어와 세션이 심긴 상태에서 새 비밀번호를 저장한다.
+export async function updatePassword(password: string) {
+  const sb = createSupabaseServerClient(await cookies());
+  // 링크 만료·직접 URL 진입 방어. 세션이 없으면 updateUser 가 엉뚱한 오류를 낸다.
+  const { data: { user } } = await sb.auth.getUser();
+  if (!user) {
+    return { error: '재설정 링크가 만료되었습니다. 메일을 다시 요청해 주세요.' };
+  }
+  const { error } = await sb.auth.updateUser({ password });
+  if (error) {
+    if (error.message.includes('should be at least')) {
+      return { error: '비밀번호는 6자 이상이어야 합니다.' };
+    }
+    if (error.message.includes('different from the old')) {
+      return { error: '기존과 다른 비밀번호를 입력해 주세요.' };
+    }
+    return { error: error.message };
+  }
+  return { ok: true };
+}
+
 export async function signOut() {
   const sb = createSupabaseServerClient(await cookies());
   await sb.auth.signOut();

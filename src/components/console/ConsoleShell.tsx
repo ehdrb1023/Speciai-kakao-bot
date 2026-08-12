@@ -33,6 +33,7 @@ export function ConsoleShell({
   badges,
   isAdmin = false,
   initialView = 'kakao',
+  signOutAction,
 }: {
   slots: ConsoleSlots;
   brandName: string;
@@ -43,8 +44,11 @@ export function ConsoleShell({
   badges?: { kakao?: number };
   isAdmin?: boolean;
   initialView?: ViewKey;
+  /** 서버 액션. 세션을 지우고 sign-in 으로 리다이렉트한다 */
+  signOutAction: () => Promise<void>;
 }) {
   const [view, setView] = useState<ViewKey>(initialView);
+  const [signingOut, setSigningOut] = useState(false);
   const avatar = userName.charAt(0) || '·';
   const navItems = NAV.filter((n) => !n.adminOnly || isAdmin);
 
@@ -107,6 +111,24 @@ export function ConsoleShell({
               <span>{userRole}</span>
             </span>
             <span className="av">{avatar}</span>
+            <button
+              type="button"
+              className="cv2-logout"
+              title="로그아웃"
+              aria-label="로그아웃"
+              disabled={signingOut}
+              onClick={async () => {
+                setSigningOut(true);
+                try {
+                  // 액션 안에서 redirect 하므로 정상 흐름에서는 여기로 돌아오지 않는다.
+                  await signOutAction();
+                } finally {
+                  setSigningOut(false);
+                }
+              }}
+            >
+              <Ic id="i-out" w={16} />
+            </button>
           </div>
         </div>
       </header>

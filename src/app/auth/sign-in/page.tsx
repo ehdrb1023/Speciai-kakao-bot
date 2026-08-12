@@ -1,6 +1,11 @@
 import { cookies } from 'next/headers';
 import { SignInForm } from '@/lib/ui';
-import { signInWithKakao, signInWithEmail, signUpWithEmail } from '@/server/actions/auth';
+import {
+  signInWithKakao,
+  signInWithEmail,
+  signUpWithEmail,
+  requestPasswordReset,
+} from '@/server/actions/auth';
 import { BRAND } from '@/lib/brand';
 
 export const metadata = { title: `로그인 · ${BRAND.name}` };
@@ -39,6 +44,7 @@ export default async function Page() {
           kakaoAction={signInWithKakao}
           emailSignInAction={signInWithEmail}
           emailSignUpAction={signUpWithEmail}
+          passwordResetAction={requestPasswordReset}
         />
       </div>
     </div>

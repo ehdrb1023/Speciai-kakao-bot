@@ -356,6 +356,18 @@ a {
   gap: 14px;
   margin-bottom: 12px;
 }
+/* 가입 전환 · 비밀번호 찾기를 한 줄에 양끝으로 */
+.auth-links {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0 16px;
+}
+.auth-links .auth-switch {
+  width: auto;
+  padding: 0;
+}
 .auth-switch {
   width: 100%;
   background: none;
