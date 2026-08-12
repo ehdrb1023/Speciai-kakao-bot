@@ -586,7 +586,8 @@ function probeSendOnce(room, reply, tag) {
   try {
     if (reply) {
       var r1 = reply('[전송테스트' + tag + '] ① replier');
-      out.push('replier=OK(' + r1 + ')');
+      // 반환값이 명시적으로 false 일 때만 실패로 본다. 버전에 따라 아무것도 안 돌려준다.
+      out.push('replier=' + (r1 === false ? '실패' : 'OK') + '(' + r1 + ')');
     } else {
       out.push('replier=없음');
     }
@@ -597,7 +598,7 @@ function probeSendOnce(room, reply, tag) {
       var can = '?';
       try { if (_bot.canReply) can = String(_bot.canReply(room)); } catch (eC) {}
       var r2 = _bot.send(room, '[전송테스트' + tag + '] ② bot.send');
-      out.push('bot.send=OK(' + r2 + ') canReply=' + can);
+      out.push('bot.send=' + (r2 === false ? '실패' : 'OK') + '(' + r2 + ') canReply=' + can);
     } else {
       out.push('bot.send=없음');
     }
@@ -606,7 +607,7 @@ function probeSendOnce(room, reply, tag) {
   try {
     if (typeof Api !== 'undefined' && Api.replyRoom) {
       var r3 = Api.replyRoom(room, '[전송테스트' + tag + '] ③ Api.replyRoom');
-      out.push('Api.replyRoom=OK(' + r3 + ')');
+      out.push('Api.replyRoom=' + (r3 === false ? '실패' : 'OK') + '(' + r3 + ')');
     } else {
       out.push('Api.replyRoom=없음');
     }
@@ -792,7 +793,11 @@ function captureReplyAction(sbn, room) {
 function sendViaNotiReply(room, text) {
   var rec = _notiReplyByRoom[normRoom(room)];
   if (!rec) return { ok: false, error: '알림 답장 통로 없음(그 방 알림을 아직 못 받았다)' };
-  if ((_now() - rec.at) > REPLY_TTL_MS) return { ok: false, error: '알림 답장 통로 만료' };
+
+  // 오래됐다고 미리 포기하지 않는다. 카톡 알림 세션이 실제로 얼마나 사는지는 우리가 모른다.
+  // 우리가 정한 시한으로 먼저 거절하면, 멀쩡히 나갈 수 있는 것을 못 나가게 막는 셈이다.
+  // 만료됐으면 PendingIntent.send 가 실패하고, 그건 그대로 실패로 보고된다 — 그쪽이 정직하다.
+  var ageMin = Math.round((_now() - rec.at) / 60000);
 
   var ctx = appContext();
   if (ctx === null) return { ok: false, error: 'Context 없음' };
@@ -805,9 +810,9 @@ function sendViaNotiReply(room, text) {
     }
     android.app.RemoteInput.addResultsToIntent(rec.inputs, intent, bundle);
     rec.action.actionIntent.send(ctx, 0, intent);
-    return { ok: true, via: 'noti.remoteInput' };
+    return { ok: true, via: 'noti.remoteInput(' + ageMin + '분 된 세션)' };
   } catch (e) {
-    return { ok: false, error: 'RemoteInput 전송 실패 ' + e };
+    return { ok: false, error: 'RemoteInput 전송 실패(' + ageMin + '분 된 세션) ' + e };
   }
 }
 
@@ -833,11 +838,12 @@ function sendToRoom(room, text) {
     } catch (e1) { errs.push('bot.send 예외 ' + e1); }
   }
 
+  // 여기도 시한으로 미리 거르지 않는다(sendViaNotiReply 의 이유와 같다). 실패하면 다음 통로로 간다.
   var rp = _replierByRoom[normRoom(room)];
-  if (rp && (_now() - rp.at) <= REPLY_TTL_MS) {
+  if (rp) {
     try {
       var r2 = rp.fn(text);
-      if (r2 !== false) return { ok: true, via: 'replier' };
+      if (r2 !== false) return { ok: true, via: 'replier(' + Math.round((_now() - rp.at) / 60000) + '분)' };
       errs.push('replier=false');
     } catch (e2) { errs.push('replier 예외 ' + e2); }
   }
@@ -1763,7 +1769,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12n DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12o DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
