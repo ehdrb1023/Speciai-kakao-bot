@@ -641,6 +641,41 @@ var OUTBOX_GEN_PROP = 'sq.kakao.outbox.gen';
 var _pendingJobs = [];   // 인입 응답에 얹혀 온 것 — 다음 주기에 루프가 집어간다
 var _lastSendAt = 0;
 
+/**
+ * 연속 실패 시 폴링 간격을 늘린다.
+ *
+ * 서버가 오래 죽어 있을 때 15초마다 두드리는 것은 배터리·데이터·서버 몫을 다 태운다.
+ * 실측(2026-08-12): Vercel 프로젝트가 중단돼 402 가 돌아오는 동안 계속 두드렸다.
+ * 실패가 쌓이면 간격을 두 배씩 늘리고 10분에서 멈춘다 — 서버가 살아나면 한 번 성공으로
+ * 곧바로 원래 주기로 돌아온다. 아예 멈추지 않는 이유는 사람이 다시 켜줘야 하는 상태를
+ * 만들지 않기 위해서다.
+ */
+var OUTBOX_MAX_BACKOFF_MS = 10 * 60 * 1000;
+var _outboxFailStreak = 0;
+var _outboxLastCode = 0;
+
+function _outboxNoteFailure(code) {
+  _outboxFailStreak++;
+  // 같은 코드가 반복되면 로그를 도배하지 않는다. 처음과 10회마다만 남긴다.
+  if (code !== _outboxLastCode || _outboxFailStreak % 10 === 1) {
+    var why = '';
+    if (code === 402) why = ' — 배포가 중단된 상태다(Vercel 결제·사용량 한도). 서버를 다시 켜야 한다';
+    else if (code === 401) why = ' — 토큰이 서버 KAKAO_INGEST_TOKEN 과 다르다';
+    else if (code === 503) why = ' — 서버가 워크스페이스를 정하지 못했다(KAKAO_WORKSPACE_ID)';
+    else if (code === 0) why = ' — 서버에 닿지 못했다(네트워크·도메인)';
+    Log.e('kakao-bot[발신] 조회 실패 code=' + code + why
+      + ' · 연속 ' + _outboxFailStreak + '회, 다음 시도 ' + Math.round(outboxDelayMs() / 1000) + '초 뒤');
+  }
+  _outboxLastCode = code;
+}
+
+/** 다음 폴링까지 기다릴 시간. 실패가 쌓일수록 두 배씩, 10분에서 멈춘다. */
+function outboxDelayMs() {
+  var delay = OUTBOX_POLL_MS;
+  for (var i = 0; i < _outboxFailStreak && delay < OUTBOX_MAX_BACKOFF_MS; i++) delay *= 2;
+  return (delay > OUTBOX_MAX_BACKOFF_MS) ? OUTBOX_MAX_BACKOFF_MS : delay;
+}
+
 /** 인입 응답 본문에서 얹혀 온 발신 건을 꺼낸다. 거래처가 방금 말한 방이라 세션이 가장 확실하다. */
 function takeOutboxFrom(body) {
   if (!OUTBOX_ENABLED || !body || body.indexOf('"outbox"') < 0) return;
@@ -680,9 +715,10 @@ function outboxPost(acks) {
 
     var code = conn.getResponseCode();
     if (code !== 200) {
-      Log.e('kakao-bot[발신] 조회 실패 code=' + code);
+      _outboxNoteFailure(code);
       return null;
     }
+    _outboxFailStreak = 0;
     var reader = new java.io.BufferedReader(
       new java.io.InputStreamReader(conn.getInputStream(), 'UTF-8'));
     var body = '';
@@ -693,6 +729,7 @@ function outboxPost(acks) {
     var obj = JSON.parse(body);
     return (obj && obj.outbox) ? obj.outbox : [];
   } catch (e) {
+    _outboxNoteFailure(0);
     Log.e('kakao-bot[발신] 조회 예외: ' + e);
     return null;
   } finally {
@@ -858,6 +895,28 @@ function outboxDrain() {
 }
 
 /**
+ * 발신 루프를 세운다. 지금 살아 있는 옛 루프는 세대가 바뀌어 스스로 빠진다.
+ *
+ * ⚠️ 봇을 "끄기" 해도 이 자바 스레드는 죽지 않는다. 메신저봇R 은 스크립트 스코프만
+ * 버리고, 이미 떠 있는 데몬 스레드는 그대로 돈다. 아래 onStartCompile 훅이 불리는
+ * 단말에서는 그 훅이 세대를 바꿔 루프를 끊는다. 훅이 없는 단말에서 확실히 멈추려면
+ * **메신저봇R 앱을 강제 종료**해야 한다(설정 → 앱 → 메신저봇R → 강제 중지).
+ * 실측 2026-08-12: 봇을 끈 뒤에도 402 가 계속 찍혔다.
+ */
+function stopOutboxLoops() {
+  try {
+    java.lang.System.setProperty(OUTBOX_GEN_PROP, 'stopped-' + _now());
+    Log.i('kakao-bot[발신] 폴링 중단 요청');
+  } catch (e) {}
+}
+
+// 메신저봇R 이 스크립트를 다시 컴파일하거나 내릴 때 부르는 전역 훅. 지원하지 않는
+// 버전에서는 그냥 안 불린다(무해). 불리면 옛 루프가 즉시 끊긴다.
+function onStartCompile() {
+  stopOutboxLoops();
+}
+
+/**
  * 발신 폴링 루프.
  *
  * 스크립트를 다시 컴파일하면 새 스코프가 만들어지고 옛 루프는 그대로 살아 있다. 그대로 두면
@@ -878,7 +937,7 @@ function startOutboxLoop() {
     var t = new java.lang.Thread(new java.lang.Runnable({
       run: function () {
         while (true) {
-          try { java.lang.Thread.sleep(OUTBOX_POLL_MS); } catch (eS) { return; }
+          try { java.lang.Thread.sleep(outboxDelayMs()); } catch (eS) { return; }
           var cur = '';
           try { cur = String(java.lang.System.getProperty(OUTBOX_GEN_PROP)); } catch (eP) {}
           if (cur !== myGen) {
@@ -955,15 +1014,22 @@ function postPayload(obj) {
 
     // 4xx 는 다시 보내도 같은 결과다(토큰 오타·본문 불량). 큐에 넣으면 영원히 재시도한다.
     // 5xx·429 는 서버 쪽 일시 문제라 재시도 대상이다.
+    //
+    // 402 만은 4xx 인데도 재시도한다. 배포가 결제·사용량 한도로 중단됐다는 뜻이라 본문에는
+    // 아무 잘못이 없고, 사람이 다시 켜면 그대로 통과한다. 여기서 버리면 서버가 꺼져 있던
+    // 동안의 거래처 대화가 통째로 사라진다(실측 2026-08-12).
     if (code >= 200 && code < 300) {
       // 이 방으로 나갈 것이 응답에 실려 왔으면 받아둔다. 여기서 바로 보내지 않는 이유는
       // 발신 간격(4초+)만큼 수집이 멈추기 때문이다. 발신 루프가 집어간다.
       takeOutboxFrom(body);
       return { ok: true, body: body };
     }
-    if (code >= 400 && code < 500 && code !== 429) {
+    if (code >= 400 && code < 500 && code !== 429 && code !== 402) {
       Log.e('kakao-bot POST 영구실패 code=' + code + ' — 재시도하지 않음');
       return { ok: false, retry: false, body: body };
+    }
+    if (code === 402) {
+      Log.e('kakao-bot POST 402 — 배포가 중단돼 있다(Vercel 결제·사용량 한도). 큐에 넣고 기다린다');
     }
     return { ok: false, retry: true, body: body };
   } catch (e) {
@@ -1685,7 +1751,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12k DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12l DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
