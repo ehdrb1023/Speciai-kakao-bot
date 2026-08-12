@@ -1054,6 +1054,15 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
   var hasText = text.length > 0;
   if (!hasText && !imageB64) return; // 입장·퇴장 같은 시스템 메시지
 
+  // 전송 확인은 서버·규칙과 무관하게 단말에서만 끝난다. 그래서 제일 앞에 둔다 —
+  // 서버가 죽어 있어도(402·네트워크 단절) 발신 경로를 점검할 수 있어야 한다.
+  // 중복 선점(_claimMessage)보다도 앞이라 알림 훅과 response 양쪽이 각자 점검한다.
+  // 그래야 replier 경로(response 만 가진 것)와 RemoteInput 경로를 둘 다 볼 수 있다.
+  if (text === PROBE_CMD) {
+    probeSend(room, reply);
+    return;
+  }
+
   // 알림 훅과 response 콜백이 같은 메시지를 각각 들고 온다. 먼저 온 쪽이 처리한다.
   if (!_claimMessage(sender, text)) return;
 
@@ -1088,12 +1097,6 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
   if (DEVICE_FILTER && !known && !cmd) {
     // 규칙에 없는 방 = 개인 카톡. 로그에도 방 이름만 남기고 본문은 남기지 않는다.
     Log.i('kakao-bot: 규칙 밖 방 스킵 room="' + room + '"');
-    return;
-  }
-
-  // 전송 확인은 단말에서 끝난다 — 서버로 올리지 않고 저장도 하지 않는다(임시 진단).
-  if (text === PROBE_CMD) {
-    probeSend(room, reply);
     return;
   }
 
@@ -1751,7 +1754,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12l DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-12m DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
