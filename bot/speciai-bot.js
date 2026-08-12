@@ -10,12 +10,12 @@
  *   부르고, 정지되면 수집까지 함께 멈춘다. 발신에 4초 이상 간격과 무작위 지연을 두는 것도
  *   같은 이유다.
  *
- * ★ 개인 카톡 보호 — 이것이 이 봇의 핵심이다.
- *   서버에서 "연결된 방" 목록을 주기적으로 내려받아, 그 방만 서버로 전송한다.
- *   목록에 없는 방(개인 카톡·가족방·동창방)은 단말 밖으로 한 글자도 나가지 않는다.
- *   규칙을 한 번도 못 받았으면 아무것도 보내지 않는다(fail-closed).
- *   "전부 보내고 서버에서 거른다" 가 아니다 — 그러면 개인 대화가 서버에 도달한다.
- *   유일한 예외는 등록 명령 두 종류다(아래).
+ * ★ 개인 카톡 보호 — 거르는 곳은 지금 **서버**다(DEVICE_FILTER=false, 2026-08-12 대표 지시).
+ *   이 폰에 오는 카톡을 전부 올리고, 서버가 규칙에 걸리는 방만 저장한다. 규칙 밖 방은
+ *   본문 없이 방 이름·수신 횟수만 남고 버려진다(api/kakao/bot/ingest 가 매칭을 먼저 본다).
+ *   사진만은 예외로 단말에서 먼저 거른다(PHOTO_ONLY_FROM_KNOWN_ROOMS) — 장당 3MB 를
+ *   올려봐야 서버가 버린다.
+ *   DEVICE_FILTER=true 로 되돌리면 예전처럼 단말이 규칙에 있는 방만 올린다.
  *
  * ★ 방 등록 — 카톡방 안에서 켜고 끈다.
  *     #등록 삼성전자   이 방을 그 거래처에 붙인다. 이후 대화가 수집된다.
@@ -47,7 +47,8 @@
  *
  * ※ API2(BotManager + Event.MESSAGE) 우선. v0.7.29a 이상에서 동작한다.
  *   메신저봇R 은 알림 파싱 기반이라 단말에 따라 방 제목 대신 발신자명이 오는 경우가 있다.
- *   그 상태로는 규칙 매칭이 불가능하므로 알림 원본(conversationTitle)에서 방 제목을 복원한다.
+ *   그 상태로는 규칙 매칭이 불가능하므로 알림 원본을 직접 읽어 방 제목·발신자를 복원한다
+ *   (notiRoomOf·notiSenderOf). API2 가 없는 단말에서는 발신도 알림의 RemoteInput 으로 나간다.
  */
 
 // ── 설정 (여기 3줄만 채우면 됨) ────────────────────────────────
@@ -61,6 +62,29 @@ var OUTBOX_ENDPOINT = 'https://<배포도메인>/api/kakao/bot/outbox';
 var TOKEN = '<KAKAO_INGEST_TOKEN>'; // 서버 env KAKAO_INGEST_TOKEN 과 같은 값
 
 // ── 동작 옵션 ─────────────────────────────────────────────────
+
+/**
+ * ⚠️ 단말 선필터. **끈 상태다**(2026-08-12 대표 지시 — kakao-advisor-bot 과 같은 방식).
+ *
+ * false 면 이 폰에 오는 카톡을 전부 서버로 보내고, 무엇을 남길지는 서버가 정한다.
+ * 서버는 규칙 밖 방의 **본문을 저장하지 않는다** — 매칭을 먼저 보고 미매칭이면 방 이름과
+ * 수신 횟수만 `kakao_unmatched_rooms` 에 남기고 버린다(`api/kakao/bot/ingest`).
+ * 그래도 개인 대화가 전송 구간을 지나가고, 미분류 방 목록에 개인 카톡방 이름(사람 이름)이
+ * 쌓인다. 그걸 감수하고 켠 것이니 "왜 개인 방이 목록에 뜨냐" 로 되돌리지 말 것.
+ *
+ * true 로 되돌리면 예전처럼 단말이 규칙에 있는 방만 올린다. 그 한 줄이면 된다.
+ */
+var DEVICE_FILTER = false;
+
+/**
+ * 사진만은 선필터를 꺼도 규칙에 있는 방에서만 올린다.
+ *
+ * 사진 1장이 base64 로 최대 3MB 다. 전부 올리면 데이터·배터리를 그대로 태우는데, 서버는
+ * 업로드 전에 매칭을 먼저 보므로 규칙 밖 방의 사진은 **어차피 버려진다**. 비용만 들고
+ * 얻는 것이 없다. 텍스트와 달리 진단에도 쓸모가 없다.
+ */
+var PHOTO_ONLY_FROM_KNOWN_ROOMS = true;
+
 var HANDLE_GROUP_ONLY = false;      // true 면 단톡방만. 일부 단말이 단톡방을 1:1 로 넘겨 기본은 false.
 var SEND_TIMEOUT_MS = 8000;
 var RULES_REFRESH_MS = 10 * 60 * 1000;  // 규칙 갱신 주기(10분)
@@ -69,6 +93,26 @@ var RULES_CACHE_FILE = 'sq-kakao-rules.json'; // 앱 재시작 후에도 규칙�
 // 대시보드 발신. false 로 두면 이 봇은 예전처럼 읽기만 한다.
 var OUTBOX_ENABLED = true;
 var OUTBOX_POLL_MS = 15000;    // "보낼 것 있나" 를 물어보는 주기
+
+// 알림에 뭐가 실려오는지 매번 로그로 남긴다. 방 제목 복원이 안 될 때 원인을 보려는 것이라
+// 확인이 끝나면 false 로 되돌린다(로그가 계속 쌓인다). 본문은 길이만 남는다.
+var NOTI_DEBUG = true;
+
+/**
+ * 알림 훅에서 곧바로 수집한다(메신저봇R 의 response 콜백과 병행).
+ *
+ * 두 경로는 서로 독립된 이벤트라 순서가 보장되지 않는다. response 가 먼저 오면 그 시점에
+ * 아직 알림 기록이 없어 방 제목을 못 붙이고, 그대로 버려진다 — #등록 이 "가끔" 안 먹던
+ * 정체가 이것이다. 알림 자체에 방 제목·발신자·본문이 다 들어 있으므로 알림 쪽에서 바로
+ * 처리하면 순서에 의존하지 않는다.
+ *
+ * 같은 메시지가 두 번 올라가지 않는 근거는 단말의 _claimMessage(20초 창)이고,
+ * 그것이 새더라도 서버 멱등키(room_id, content_hash)가 한 번 더 막는다.
+ */
+var NOTI_INGEST = true;
+
+// 구 API 콜백이 알림 훅에 양보하는 시간. 알림 훅은 방 이름을 제대로 붙이고 구 API 는 못 붙인다.
+var RESPONSE_YIELD_MS = 600;
 var SEND_MIN_GAP_MS = 4000;    // 연속 발신 최소 간격. 기계적 연타는 자동화로 탐지된다
 var SEND_JITTER_MS = 1200;     // 그 위에 얹는 무작위 지연 — 간격이 일정하면 그것도 기계 신호다
 
@@ -85,14 +129,18 @@ function _now() { return java.lang.System.currentTimeMillis(); }
  * Java 포맷터를 먼저 쓴다. 타임존을 UTC 로 고정하고 'Z' 를 직접 붙이는 이유는
  * SimpleDateFormat 의 Z 패턴이 "+0900" 을 내놓아 서버 파싱이 애매해지기 때문이다.
  */
-function nowIso() {
+function isoFromMillis(ms) {
   try {
     var fmt = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
     fmt.setTimeZone(java.util.TimeZone.getTimeZone('UTC'));
-    return String(fmt.format(new java.util.Date())) + 'Z';
+    return String(fmt.format(new java.util.Date(ms))) + 'Z';
   } catch (e) {
-    try { return new Date().toISOString(); } catch (e2) { return ''; }
+    try { return new Date(ms).toISOString(); } catch (e2) { return ''; }
   }
+}
+
+function nowIso() {
+  return isoFromMillis(_now());
 }
 
 // ── 규칙 (서버에서 내려받음) ──────────────────────────────────
@@ -510,8 +558,8 @@ function flushQueue() {
 // 부터 알아야 한다. 메신저봇R 의 전송은 알림에 실린 RemoteInput 세션으로 나가는데,
 // 단말·카톡 버전에 따라 아예 동작하지 않거나 세션이 금방 만료된다.
 //
-// 등록된 방에서 "#전송테스트" 를 치면 서버로 보내지 않고 단말에서만 세 경로를 시도한다.
-//   ① 이벤트 replier(chat.reply / replier.reply)  ② bot.send(room)  ③ Api.replyRoom(room)
+// 등록된 방에서 "#전송테스트" 를 치면 서버로 보내지 않고 단말에서만 네 경로를 시도한다.
+//   ① 이벤트 replier  ② bot.send(room)  ③ Api.replyRoom(room)  ④ 알림 RemoteInput
 // 60초 뒤 같은 방에 한 번 더 보낸다. 이 두 번째가 나가야 "방이 조용한 동안에도 발신 가능",
 // 즉 대시보드에서 아무 때나 쓸 수 있다는 뜻이 된다. 안 나가면 거래처가 말을 건 직후에만
 // 나가는 구조가 된다. 확인이 끝나면 이 블록은 지운다.
@@ -549,6 +597,12 @@ function probeSendOnce(room, reply, tag) {
       out.push('Api.replyRoom=없음');
     }
   } catch (e3) { out.push('Api.replyRoom=ERR ' + e3); }
+
+  // ④ 알림의 RemoteInput. API2 도 없고 메신저봇R 이 방 제목도 모르는 단말에서는 이것만 남는다.
+  try {
+    var r4 = sendViaNotiReply(room, '[전송테스트' + tag + '] ④ 알림 RemoteInput');
+    out.push('notiReply=' + (r4.ok ? 'OK' : 'NO(' + r4.error + ')'));
+  } catch (e4) { out.push('notiReply=ERR ' + e4); }
 
   Log.i('kakao-bot[전송테스트' + tag + '] room="' + room + '" ' + out.join(' | '));
 }
@@ -646,8 +700,73 @@ function outboxPost(acks) {
   }
 }
 
+// ── 방으로 나가는 통로 확보 ───────────────────────────────────
+//
+// 서버가 주는 방 이름은 우리가 교정한 이름(진짜 방 제목)이다. 그런데 메신저봇R 은 이 단말에서
+// 방을 발신자명으로 알고 있어, Api.replyRoom(교정된 이름) 은 아는 방이 없다며 실패한다.
+// 그래서 통로를 두 가지로 직접 들고 있는다.
+//   1) replier   — 그 방에서 마지막으로 받은 메시지의 답장 객체(메신저봇R 이 준 것)
+//   2) RemoteInput — 카톡 알림에 실린 "답장" 액션. API2 도 replier 도 없을 때의 마지막 수단
+// 둘 다 카톡 알림 세션을 물고 있어 방이 오래 조용하면 만료된다. 만료는 발신 실패로 보고되고
+// 대시보드에 failed 로 뜬다 — 조용히 사라지는 것보다 낫다.
+var REPLY_TTL_MS = 30 * 60 * 1000;
+var _replierByRoom = {};   // 교정된 방 제목 → { fn, raw, at }
+var _notiReplyByRoom = {}; // 교정된 방 제목 → { action, inputs, at }
+
+/** response·API2 콜백이 준 답장 객체를 그 방 이름으로 걸어둔다. raw 는 메신저봇R 이 아는 방 이름. */
+function rememberReplier(room, rawRoom, replyFn) {
+  if (!room || !replyFn) return;
+  _replierByRoom[normRoom(room)] = { fn: replyFn, raw: rawRoom || '', at: _now() };
+}
+
+/** 카톡 알림의 "답장"(RemoteInput) 액션을 그 방 이름으로 걸어둔다. */
+function captureReplyAction(sbn, room) {
+  if (!room) return;
+  try {
+    var acts = sbn.getNotification().actions;
+    if (!acts || !acts.length) return;
+    for (var i = 0; i < acts.length; i++) {
+      var a = acts[i];
+      var ris = null;
+      try { ris = a.getRemoteInputs(); } catch (e) {}
+      if (!ris || !ris.length) continue;
+      _notiReplyByRoom[normRoom(room)] = { action: a, inputs: ris, at: _now() };
+      return;
+    }
+  } catch (e2) {
+    Log.e('kakao-bot[발신] 알림 답장 액션 확보 실패: ' + e2);
+  }
+}
+
 /**
- * 방에 실제로 글을 넣는다.
+ * 알림에 실린 RemoteInput 으로 직접 답장한다.
+ * NotificationListenerService 는 다른 앱 알림의 PendingIntent 를 실행할 수 있다 —
+ * 카톡 알림창에서 사람이 답장을 치는 것과 같은 경로다.
+ */
+function sendViaNotiReply(room, text) {
+  var rec = _notiReplyByRoom[normRoom(room)];
+  if (!rec) return { ok: false, error: '알림 답장 통로 없음(그 방 알림을 아직 못 받았다)' };
+  if ((_now() - rec.at) > REPLY_TTL_MS) return { ok: false, error: '알림 답장 통로 만료' };
+
+  var ctx = appContext();
+  if (ctx === null) return { ok: false, error: 'Context 없음' };
+
+  try {
+    var intent = new android.content.Intent();
+    var bundle = new android.os.Bundle();
+    for (var i = 0; i < rec.inputs.length; i++) {
+      bundle.putCharSequence(rec.inputs[i].getResultKey(), text);
+    }
+    android.app.RemoteInput.addResultsToIntent(rec.inputs, intent, bundle);
+    rec.action.actionIntent.send(ctx, 0, intent);
+    return { ok: true, via: 'noti.remoteInput' };
+  } catch (e) {
+    return { ok: false, error: 'RemoteInput 전송 실패 ' + e };
+  }
+}
+
+/**
+ * 방에 실제로 글을 넣는다. 통로를 순서대로 시도하고, 전부 실패하면 이유를 모아 보고한다.
  *
  * 반환값 판정이 애매한 점에 주의: 메신저봇R 버전에 따라 이 API 들이 boolean 을 주기도 하고
  * 아무것도 안 주기도 한다. 그래서 "명시적으로 false 일 때만 실패" 로 본다 — undefined 를
@@ -658,25 +777,45 @@ function sendToRoom(room, text) {
     return { ok: false, error: '규칙에 없는 방 — 단말에서 거부' };
   }
 
-  var lastErr = '';
+  var errs = [];
 
   if (_bot && _bot.send) {
     try {
       var r1 = _bot.send(room, text);
       if (r1 !== false) return { ok: true, via: 'bot.send' };
-      lastErr = 'bot.send=false (알림 세션 없음)';
-    } catch (e1) { lastErr = 'bot.send 예외 ' + e1; }
+      errs.push('bot.send=false');
+    } catch (e1) { errs.push('bot.send 예외 ' + e1); }
   }
+
+  var rp = _replierByRoom[normRoom(room)];
+  if (rp && (_now() - rp.at) <= REPLY_TTL_MS) {
+    try {
+      var r2 = rp.fn(text);
+      if (r2 !== false) return { ok: true, via: 'replier' };
+      errs.push('replier=false');
+    } catch (e2) { errs.push('replier 예외 ' + e2); }
+  }
+
+  var viaNoti = sendViaNotiReply(room, text);
+  if (viaNoti.ok) return viaNoti;
+  errs.push(viaNoti.error);
 
   if (typeof Api !== 'undefined' && Api.replyRoom) {
-    try {
-      var r2 = Api.replyRoom(room, text);
-      if (r2 !== false) return { ok: true, via: 'Api.replyRoom' };
-      lastErr = 'Api.replyRoom=false (알림 세션 없음)';
-    } catch (e2) { lastErr = 'Api.replyRoom 예외 ' + e2; }
+    // 메신저봇R 이 아는 이름으로 먼저 시도한다. 이 단말에서 그 이름은 방 제목이 아니라
+    // 발신자명이라, 교정된 이름으로 부르면 "그런 방 없음" 으로 실패한다.
+    var names = [];
+    if (rp && rp.raw && normRoom(rp.raw) !== normRoom(room)) names.push(rp.raw);
+    names.push(room);
+    for (var i = 0; i < names.length; i++) {
+      try {
+        var r3 = Api.replyRoom(names[i], text);
+        if (r3 !== false) return { ok: true, via: 'Api.replyRoom("' + names[i] + '")' };
+        errs.push('Api.replyRoom("' + names[i] + '")=false');
+      } catch (e3) { errs.push('Api.replyRoom 예외 ' + e3); }
+    }
   }
 
-  return { ok: false, error: lastErr || '전송 API 없음' };
+  return { ok: false, error: errs.length ? errs.join(' / ') : '전송 API 없음' };
 }
 
 /** 연속 발신 사이 간격을 벌린다. 사람이 치는 속도를 벗어나면 자동화로 탐지된다. */
@@ -837,15 +976,20 @@ function postPayload(obj) {
 }
 
 // ── 수집 본체 (구·신 API 공통) ────────────────────────────────
-function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, reply) {
+//
+// tsOverride: 메시지 자신의 시각(알림에서 꺼낸 것). 없으면 지금 시각을 쓴다.
+function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, reply, tsOverride) {
   if (HANDLE_GROUP_ONLY && !isGroupChat) return;
 
   // 메시지가 도착한 시각을 여기서 못 박는다. 큐에 들어가 나중에 보내도 이 값이 따라간다.
-  var ts = nowIso();
+  var ts = tsOverride || nowIso();
 
   var text = trimText(msg);
   var hasText = text.length > 0;
   if (!hasText && !imageB64) return; // 입장·퇴장 같은 시스템 메시지
+
+  // 알림 훅과 response 콜백이 같은 메시지를 각각 들고 온다. 먼저 온 쪽이 처리한다.
+  if (!_claimMessage(sender, text)) return;
 
   // 새 메시지를 보내기 전에 밀린 것을 먼저 비운다. 순서를 지키기 위한 것이기도 하고,
   // 타이머 없이 재시도를 굴리는 유일한 방법이기도 하다(메신저봇R 에서 타이머 스레드는
@@ -854,8 +998,9 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
 
   refreshRules(false);
 
-  if (!_rulesEverLoaded) {
-    // 서버에 한 번도 닿지 못한 상태. 여기서 다 보내면 개인 카톡이 새어 나간다. 아무것도 안 보낸다.
+  // 선필터가 켜져 있을 때만 규칙이 필수다. 규칙을 못 받았는데 필터로 거르겠다는 건
+  // "무엇을 거를지 모르는 채로 거른다" 는 뜻이라, 그때는 아무것도 안 보낸다(fail-closed).
+  if (DEVICE_FILTER && !_rulesEverLoaded) {
     Log.e('kakao-bot: 규칙 미수신 — 전송 보류 room="' + room + '"');
     return;
   }
@@ -864,7 +1009,17 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
   // 방에서 "#등록" 을 쳐도 단말이 먼저 버려 영원히 등록할 수 없다.
   var cmd = isRoomCommand(text);
 
-  if (!isAllowedRoom(room) && !cmd) {
+  // 방 이름 자리에 발신자명이 있는 상태로 올려봐야 서버가 rejected:no-room-title 로 돌려보낸다
+  // (그 이름으로 규칙을 만들면 그 사람이 말하는 모든 방이 한 거래처로 붙기 때문이다).
+  // 구 API 콜백은 이 단말에서 늘 room=발신자명 이라, 안 보내는 편이 로그가 깨끗하다.
+  // 같은 메시지를 알림 훅이 제대로 된 방 이름으로 이미 올린다.
+  if (cmd && normRoom(room) === normRoom(sender)) {
+    Log.i('kakao-bot: 방 이름 = 발신자명 — 등록 명령 보류(알림 훅이 처리한다)');
+    return;
+  }
+
+  var known = isAllowedRoom(room);
+  if (DEVICE_FILTER && !known && !cmd) {
     // 규칙에 없는 방 = 개인 카톡. 로그에도 방 이름만 남기고 본문은 남기지 않는다.
     Log.i('kakao-bot: 규칙 밖 방 스킵 room="' + room + '"');
     return;
@@ -877,19 +1032,24 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
   }
 
   // 명령은 사진을 함께 올리지 않는다 — 서버가 저장하지 않고 버리므로 보낼 이유가 없다.
-  var obj = buildPayloadObj(room, sender, text, cmd ? null : imageB64, chatId, logId, ts);
+  // 규칙 밖 방의 사진도 마찬가지다(서버가 업로드 전에 매칭을 먼저 본다).
+  var photo = (cmd || (PHOTO_ONLY_FROM_KNOWN_ROOMS && !known)) ? null : imageB64;
+  var obj = buildPayloadObj(room, sender, text, photo, chatId, logId, ts);
   var res = postPayload(obj);
   if (!res.ok && res.retry) enqueue(obj);
 }
 
 // ── 알림에서 진짜 방 제목 확보 ────────────────────────────────
-// 카톡 알림(MessagingStyle)은 title 에 발신자명을, conversationTitle/subText 에 방 제목을 넣는다.
-// 메신저봇R 이 title 만 읽어 room 으로 넘기는 단말이 있어, 그 경우 단톡방인데도 말한 사람마다
-// room 이 달라진다. 그 상태로는 접두어 규칙이 걸릴 수 없으므로 알림 원본에서 방 제목을 복원한다.
+// 카톡 알림(MessagingStyle)은 단톡방에서 title·conversationTitle 에 **방 제목**을 넣고,
+// 발신자는 android.messages 안에만 넣는다(1:1 은 title 이 곧 상대 이름 = 방 이름).
+// 메신저봇R 이 이 구조를 못 풀고 발신자명을 room 으로 넘기는 단말이 있어, 그 경우 단톡방인데도
+// 말한 사람마다 room 이 달라진다. 그 상태로는 규칙이 걸릴 수 없어 알림 원본에서 복원한다.
 var _notiBySender = {};
 var _notiLast = null;
 var _notiOk = false;
 var NOTI_TTL_MS = 15000;
+// 알림 속 메시지 시각이 이보다 오래됐으면 재게시로 본다(카톡은 같은 알림을 다시 올린다).
+var NOTI_STALE_MS = 120000;
 
 /**
  * 알림 1건을 기억한다. 발신자 → 방 제목·본문·사진.
@@ -897,12 +1057,12 @@ var NOTI_TTL_MS = 15000;
  * ⚠️ 어떤 필드도 직전 기록에서 물려받지 않는다. 실측(2026-08-11)에서 물려받기가
  * 개인 카톡 유출을 만들었다:
  *   1) 신동규가 [테스트상자] 발주 방에서 말함 → _notiBySender["신동규"].room = 그 방
- *   2) 같은 사람과의 1:1 개인 카톡 → 1:1 알림에는 conversationTitle 이 없어 room 이 빈 값
+ *   2) 같은 사람과의 1:1 개인 카톡 → 그 알림의 room 이 빈 값이라고 잘못 판정
  *   3) 빈 값이면 이전 방을 물려받도록 되어 있어 → 개인 대화가 거래처 방으로 전송됨
  *
- * "방 제목이 없다" 와 "같은 방인데 알림에 제목이 빠졌다" 는 알림만 보고 구별할 수 없다.
- * 구별할 수 없으면 추측하지 않는다 — 그게 fail-closed 다. 제목을 못 얻으면 그 메시지는
- * 규칙에 걸리지 않아 전송되지 않고, 그쪽이 훨씬 안전하다.
+ * 2단계가 애초에 틀렸다. 1:1 방에도 이름이 있다 — 상대 이름이 곧 방 이름이다.
+ * 그것을 제대로 채워 넣으면 "빈 칸" 자체가 생기지 않고, 물려받기가 필요 없어진다
+ * (notiRoomOf 참고). 그래서 여기서는 물려받지 않는다.
  */
 function _rememberNoti(sender, room, text, imageB64) {
   var rec = {
@@ -913,6 +1073,42 @@ function _rememberNoti(sender, room, text, imageB64) {
   };
   if (sender) _notiBySender[String(sender)] = rec;
   _notiLast = rec;
+}
+
+/**
+ * 이 메시지를 지금 내가 처리한다고 선점한다. 이미 다른 경로가 가져갔으면 false.
+ *
+ * 알림 훅과 response 콜백이 같은 메시지를 각각 들고 온다. 순서가 보장되지 않아 어느 쪽이
+ * 먼저일지 모르므로, "먼저 온 쪽이 처리한다" 로 정리한다. 서버 멱등키가 한 번 더 막지만
+ * 그건 최후의 그물이고, 여기서 잡으면 왕복이 절반으로 준다.
+ *
+ * 창을 20초로 잡은 이유: 두 경로의 시차는 밀리초 단위라 넉넉하고, 사람이 같은 말을
+ * 정말로 두 번 하는 간격(같은 분 안)은 서버 해시가 어차피 하나로 합친다.
+ */
+var CLAIM_TTL_MS = 20000;
+var _claims = {};
+var _claimSweptAt = 0;
+
+function _claimMessage(sender, text) {
+  var now = _now();
+  // ★ 열쇠에 방 이름을 넣지 않는다. 두 경로가 같은 메시지에 **서로 다른 방 이름**을 붙여
+  //   오기 때문이다(알림 훅은 "방#12345", 구 API 는 발신자명). 방을 넣으면 열쇠가 갈라져
+  //   둘 다 통과하고, 같은 말이 서로 다른 두 방에 각각 쌓인다.
+  var key = normRoom(sender) + '|' + trimText(text).slice(0, 80);
+
+  // 맵이 무한정 자라지 않게 가끔 쓸어낸다. 타이머를 쓸 수 없는 환경이라 호출 시점에 한다.
+  if (now - _claimSweptAt > CLAIM_TTL_MS) {
+    _claimSweptAt = now;
+    var fresh = {};
+    for (var k in _claims) {
+      if (_claims.hasOwnProperty(k) && (now - _claims[k]) < CLAIM_TTL_MS) fresh[k] = _claims[k];
+    }
+    _claims = fresh;
+  }
+
+  if (_claims[key] && (now - _claims[key]) < CLAIM_TTL_MS) return false;
+  _claims[key] = now;
+  return true;
 }
 
 /**
@@ -935,18 +1131,41 @@ function _notiTextMatches(recText, msgText) {
   return a.indexOf(head) >= 0 && b.indexOf(head) >= 0;
 }
 
+/**
+ * 이 알림 기록으로 방 제목을 인정할 수 있는가.
+ *
+ * 본문이 있으면 대조한다 — 알림 훅과 메시지 콜백은 순서가 보장되지 않아, 대조 없이 믿으면
+ * 같은 사람의 직전 알림(개인 카톡)이 거래처 방으로 둔갑한다.
+ *
+ * 본문이 아예 없으면 대조할 방법이 없다. 이때 "불일치" 로 처리하면 방 제목이 멀쩡히
+ * 실려 있어도 영원히 못 쓴다(실측 2026-08-12: 알림 내용 숨김·요약 알림에서 본문이 빈다).
+ * 그래서 본문이 없는 알림은 방 제목만 보고 한 번 인정하되, 쓰는 즉시 소모한다 —
+ * 한 알림이 두 메시지의 방을 대신하지 못하게 한다.
+ */
+function _notiRoomUsable(rec, msgText) {
+  if (!rec || !rec.room) return false;
+  if ((_now() - rec.at) >= NOTI_TTL_MS) return false;
+  if (trimText(rec.text)) return _notiTextMatches(rec.text, msgText);
+  return true;
+}
+
 function _lookupNotiRoom(sender, msgText) {
-  var now = _now();
   if (sender) {
     var r = _notiBySender[String(sender)];
-    if (r && r.room && (now - r.at) < NOTI_TTL_MS && _notiTextMatches(r.text, msgText)) {
-      return r.room;
+    if (_notiRoomUsable(r, msgText)) {
+      var room = r.room;
+      // 본문 없이 인정한 건은 한 번만 쓴다 — 한 알림이 뒤따르는 메시지의 방까지 대신하면
+      // 그게 곧 물려받기이고, 물려받기가 개인 카톡 유출을 만든다.
+      if (!trimText(r.text)) r.room = '';
+      return room;
     }
   }
-  // 직전 알림이 아주 최근(1.5초 이내)이면 그 방으로 본다. 본문 대조는 여기서도 요구한다.
-  if (_notiLast && _notiLast.room && (now - _notiLast.at) < 1500
-      && _notiTextMatches(_notiLast.text, msgText)) {
-    return _notiLast.room;
+  // 직전 알림이 아주 최근(1.5초 이내)이면 그 방으로 본다.
+  if (_notiLast && _notiLast.room && (_now() - _notiLast.at) < 1500
+      && _notiRoomUsable(_notiLast, msgText)) {
+    var last = _notiLast.room;
+    if (!trimText(_notiLast.text)) _notiLast.room = '';
+    return last;
   }
   return null;
 }
@@ -983,13 +1202,14 @@ function _takeNotiImage(sender) {
 }
 
 // ── 알림 파싱 (API2·구 API 공통) ──────────────────────────────
-// 메신저봇R 은 알림의 android.title 만 읽어 room 으로 넘긴다. 단톡방에서 그 값은 발신자명이라
-// 접두어 규칙이 걸릴 수 없다. 여기서 알림 원본을 직접 읽어 진짜 방 제목을 기억해 둔다.
+// 여기서 알림 원본을 직접 읽어 방 제목·발신자·본문을 뽑는다. 메신저봇R 이 넘겨주는 room 보다
+// 이쪽이 정확하고, NOTI_INGEST 가 켜져 있으면 여기서 곧바로 수집까지 한다.
 // API2 는 Event.NOTIFICATION_POSTED 로, 구 API 는 전역 onNotificationPosted 로 들어온다.
 var _api2 = false;      // 리스너 등록 성공 여부
 var _api2Fired = false; // API2 로 메시지를 실제로 1건이라도 받았는지
 var _api2Why = '';      // API2 가 안 켜진 이유(진단용)
 var _notiSeen = false;  // 알림 훅이 한 번이라도 불렸는지 — 복원 실패 원인 구분용
+var _notiKeysLogged = false; // extras 키 덤프는 한 번이면 된다
 var _bot = null;
 
 // ── 알림에서 사진 꺼내기 ──────────────────────────────────────
@@ -1099,11 +1319,226 @@ function extractNotiImage(ex) {
   return b64;
 }
 
+/**
+ * MessagingStyle 알림에서 마지막 메시지의 발신자명을 꺼낸다.
+ *
+ * ★ 여기가 오래 틀려 있던 자리다. 단톡방 알림은 android.title 에 **방 제목**을 넣고,
+ *   발신자는 android.messages 안에만 넣는다. title 을 발신자로 쓰면 _notiBySender 가
+ *   방 이름을 키로 잡아 구 API 쪽 조회(_lookupNotiRoom(sender))가 100% 빗나간다.
+ *   방 제목이 알림에 멀쩡히 실려 와도 "방제목 복원 실패" 가 되고 #등록 부터 안 먹는다.
+ */
+function notiSenderOf(ex) {
+  try {
+    var arr = ex.get('android.messages');
+    if (arr === null || arr === undefined) return '';
+    for (var i = arr.length - 1; i >= 0; i--) {
+      var b = arr[i];
+      if (!b || !b.get) continue;
+      var p = b.get('sender_person');  // API 28+ 은 Person 객체로 온다
+      if (p !== null && p !== undefined) {
+        try {
+          var nm = p.getName();
+          if (nm !== null && nm !== undefined && String(nm)) return String(nm);
+        } catch (eP) {}
+      }
+      var s = b.get('sender');         // 구형은 CharSequence
+      if (s !== null && s !== undefined && String(s)) return String(s);
+    }
+  } catch (e) {}
+  return '';
+}
+
+/** MessagingStyle 마지막 메시지 본문. bigText 보다 정확하다(발신자명이 섞이지 않는다). */
+function notiTextOf(ex) {
+  try {
+    var arr = ex.get('android.messages');
+    if (arr === null || arr === undefined) return '';
+    for (var i = arr.length - 1; i >= 0; i--) {
+      var b = arr[i];
+      if (!b || !b.get) continue;
+      var t = b.get('text');
+      if (t !== null && t !== undefined && String(t)) return String(t);
+    }
+  } catch (e) {}
+  return '';
+}
+
+/**
+ * MessagingStyle 마지막 메시지가 찍힌 시각(epoch ms). 없으면 0.
+ *
+ * 이 값이 중요한 이유: 카톡은 같은 알림을 여러 번 다시 올린다(읽음 처리·묶음 갱신 등).
+ * 그때마다 지금 시각을 ts 로 붙이면 서버 멱등키 md5(분단위시각|발화자|본문) 의 분이 달라져
+ * 같은 말이 두 번 저장된다. 메시지 자신의 시각을 쓰면 몇 번을 다시 받아도 같은 키가 된다.
+ */
+function notiTimeOf(ex) {
+  try {
+    var arr = ex.get('android.messages');
+    if (arr === null || arr === undefined) return 0;
+    for (var i = arr.length - 1; i >= 0; i--) {
+      var b = arr[i];
+      if (!b || !b.get) continue;
+      var t = b.get('time');
+      if (t === null || t === undefined) continue;
+      var ms = parseFloat(String(t));  // java.lang.Long → 숫자
+      if (ms > 0) return ms;
+    }
+  } catch (e) {}
+  return 0;
+}
+
+/**
+ * 단톡방인가. java.lang.Boolean 은 값이 false 여도 객체라 그냥 !! 하면 항상 true 다 —
+ * 문자열로 비교해야 한다. 키가 없는 단말도 있어서 없으면 false 로 본다.
+ */
+function notiIsGroup(ex) {
+  try {
+    var v = ex.get('android.isGroupConversation');
+    if (v !== null && v !== undefined) return String(v) === 'true';
+  } catch (e) {}
+  return false;
+}
+
+/** 카톡이 채팅방 알림들 위에 얹는 묶음(요약) 알림. 본문도 방 제목도 없어 처리하면 안 된다. */
+function notiIsSummary(sbn) {
+  try {
+    var FLAG_GROUP_SUMMARY = 0x00000200;
+    return (sbn.getNotification().flags & FLAG_GROUP_SUMMARY) !== 0;
+  } catch (e) { return false; }
+}
+
+function exStr(ex, key) {
+  try {
+    var v = ex.get(key);
+    if (v === null || v === undefined) return '';
+    var s = String(v);
+    return (s === 'null') ? '' : s;
+  } catch (e) { return ''; }
+}
+
+/**
+ * 방 제목이 실려 올 수 있는 자리. 앞에서부터 먼저 값이 있는 것을 쓴다.
+ *
+ * ★ 이 단말(실측 2026-08-12)의 카톡 알림은 화면에 (발신자 + 내용) 만 띄운다.
+ *   android.title = 발신자명, android.conversationTitle = 빈 값, android.subText = 빈 값.
+ *   단톡방이든 오픈채팅이든 1:1 이든 전부 그렇다.
+ *   그런데 extras 키 덤프에 android.hiddenConversationTitle 이 있었다 — 카톡이 방 제목을
+ *   화면에 안 띄우면서 그 자리에 숨겨 실어 보낸다(MessagingStyle 이 표시하지 않을 제목을
+ *   보관하는 표준 자리다). 여기가 이 단말에서 방 제목을 얻는 유일한 통로다.
+ *
+ *   android.title 은 후보에 넣지 않는다. 이 단말에서 그 값은 100% 발신자명이다.
+ */
+var ROOM_TITLE_KEYS = [
+  'android.conversationTitle',
+  'android.hiddenConversationTitle',
+  'android.subText',
+  'android.summaryText',
+  'android.infoText'
+];
+
+/**
+ * 방 제목을 못 얻었을 때 알림 열쇠로 만드는 대체 방 이름.
+ *
+ * 이 접두어를 바꾸면 이미 `#등록` 해둔 방들의 규칙이 전부 안 걸리게 된다. 바꾸지 말 것.
+ */
+var ROOM_ID_PREFIX = '방#';
+
+/**
+ * 이 알림이 가리키는 방 이름.
+ *
+ * 1:1 방에서 title 을 방 이름으로 쓰는 것은 안전하다 — 상대 이름이 곧 그 방의 이름이고
+ * (카톡 대화목록에 그렇게 뜬다), 무엇보다 "이 알림은 방 이름이 없다" 는 빈 칸이 사라져
+ * 빈 칸을 직전 방으로 메우는 추측(=개인 카톡 유출)이 필요 없어진다.
+ * 단톡방에서는 절대 title 로 폴백하지 않는다 — 그건 발신자명이다.
+ */
+function notiRoomOf(ex, isGroup, ntitle) {
+  for (var i = 0; i < ROOM_TITLE_KEYS.length; i++) {
+    var v = exStr(ex, ROOM_TITLE_KEYS[i]);
+    if (v) return v;
+  }
+  if (!isGroup && ntitle) return ntitle;
+  return '';
+}
+
+/**
+ * 방을 가리키는 열쇠(key). 이름을 한 글자도 못 얻는 단말에서 방을 구분하는 유일한 수단이다.
+ *
+ * ★ 실측 2026-08-12: 이 단말의 카톡 알림은 방 제목을 어느 칸에도 안 싣는다.
+ *   conversationTitle·hiddenConversationTitle·subText·summaryText·infoText 전부 빈 값,
+ *   threadId 는 **0**(모든 방이 0 이라 쓸 수 없다), chatLogId 는 메시지마다 다른 값
+ *   (3905537715021621000 = 메시지 ID, 방 ID 가 아니다).
+ *
+ *   남은 것은 알림 자신의 신원이다. 안드로이드 알림은 (패키지, tag, id) 로 식별되고,
+ *   카톡은 **채팅방 하나당 알림 하나**를 올려 같은 방의 새 메시지로 그 알림을 갱신한다.
+ *   즉 tag·id 가 곧 방 열쇠다. 이름이 아니라 이걸로 방을 가른다.
+ *
+ * 값이 없거나 0 이면 쓰지 않는다 — 0 을 그대로 쓰면 **모든 방이 한 방으로 합쳐진다**.
+ */
+function notiRoomKeyOf(sbn, ex) {
+  var candidates = [];
+  // 카톡이 스스로 실어 보내는 방 ID 가 있으면 그게 가장 정확하다.
+  // (실측 2026-08-12: 이 단말은 threadId=0 이라 여기서 걸러진다.)
+  candidates.push(exStr(ex, 'threadId'));
+  candidates.push(exStr(ex, 'chatId'));
+  // 없으면 알림 자신의 신원. 카톡은 방마다 다른 tag·id 로 알림을 올린다.
+  try { candidates.push(String(sbn.getTag() || '')); } catch (e) {}
+  try { candidates.push(String(sbn.getId())); } catch (e2) {}
+
+  for (var i = 0; i < candidates.length; i++) {
+    var v = candidates[i];
+    if (!v || v === '0' || v === 'null' || v === 'undefined') continue;
+    return v;
+  }
+
+  // 최후의 수단 — 알림 키 전체. 형식은 "user|패키지|id|tag|uid" 다.
+  //
+  // 이게 **절대 실패하지 않는** 이유: 안드로이드는 같은 키로 올린 알림을 새 알림이 아니라
+  // 기존 알림의 갱신으로 처리한다. 카톡이 채팅방 여러 개를 알림창에 동시에 띄운다는 것은
+  // 그 방들의 키가 서로 다르다는 뜻이다. tag 가 null 이고 id 가 0 이어도, 그 조합 전체는
+  // 방마다 다를 수밖에 없다. 안 그러면 방들이 서로의 알림을 덮어써서 하나만 남는다.
+  //
+  // 여기까지 왔는데 빈 값을 돌려주면 봇은 그 방을 영영 못 본다. 보기 흉해도 키를 만든다 —
+  // 이름은 사람이 대시보드에서 붙이면 된다("연결 안 된 방" 목록).
+  try {
+    var k = String(sbn.getKey() || '');
+    if (k) return k.replace(/\|/g, '-');
+  } catch (e3) {}
+  return '';
+}
+
+/**
+ * 진단용 — 알림 신원 한 줄. 방마다 다른 값이 나오는지 이 줄로 확인한다.
+ *
+ * unread 를 같이 찍는 이유: 메신저 알림은 안 읽은 메시지가 1건일 때와 여러 건일 때
+ * 형식이 달라지는 경우가 많다(1건이면 title=발신자, 여러 건이면 title=방 이름).
+ * 2026-08-11 에는 방 제목이 나왔는데 08-12 에는 안 나온 차이를 이 값으로 가려낸다.
+ */
+function notiIdentityLog(sbn, ex) {
+  var tag = '?', id = '?', gkey = '?';
+  try { tag = String(sbn.getTag()); } catch (e) {}
+  try { id = String(sbn.getId()); } catch (e2) {}
+  try { gkey = String(sbn.getGroupKey()); } catch (e3) {}
+  return 'tag=' + tag + ' id=' + id + ' group=' + gkey
+    + ' unread=' + (exStr(ex, 'android.conversationUnreadMessageCount') || '?')
+    + ' msgs=' + notiMessageCount(ex)
+    + ' style=' + (exStr(ex, 'android.template') || exStr(ex, 'notificationStyle') || '?')
+    + ' threadId=' + (exStr(ex, 'threadId') || '없음')
+    + ' chatLogId=' + (exStr(ex, 'chatLogId') || '없음');
+}
+
+function notiMessageCount(ex) {
+  try {
+    var arr = ex.get('android.messages');
+    if (arr === null || arr === undefined) return 0;
+    return arr.length;
+  } catch (e) { return '?'; }
+}
+
 function handleKakaoNoti(sbn) {
   try {
     var pkg = '';
     try { pkg = String(sbn.getPackageName()); } catch (ep) {}
     if (pkg.indexOf('kakao') < 0) return;
+    if (notiIsSummary(sbn)) return;
 
     var ex = sbn.getNotification().extras;
     function gs(key) {
@@ -1113,19 +1548,70 @@ function handleKakaoNoti(sbn) {
         return String(v);
       } catch (e) { return ''; }
     }
-    var ntitle = gs('android.title');            // 발신자명
-    var convo = gs('android.conversationTitle'); // 방 제목(카톡에서 이름을 지정한 방만)
-    var sub = gs('android.subText');             // 단말에 따라 여기에 방 제목이 온다
-    var notiBody = gs('android.bigText') || gs('android.text');
+    // ★ 이 단말에서 android.title 은 방 제목이 아니라 **발신자명**이다. 방 제목으로 쓰지 말 것.
+    var ntitle = gs('android.title');
+    var isGroup = notiIsGroup(ex) || !!gs('android.conversationTitle');
 
-    // 훅이 도는지 한 번만 남긴다. 본문은 남기지 않는다 — 개인 카톡이 로그에 쌓인다.
-    if (!_notiSeen) {
-      _notiSeen = true;
-      Log.i('kakao-bot[NOTI] 훅 동작 확인 title="' + ntitle + '" convo="' + convo + '" sub="' + sub + '"');
+    var msgSender = notiSenderOf(ex);
+    // 1:1 알림에는 messages 가 없는 단말이 있다. 그때 발신자는 상대, 즉 title 이다.
+    var sender = msgSender || (isGroup ? '' : ntitle);
+    var notiBody = notiTextOf(ex) || gs('android.bigText') || gs('android.text');
+    var msgAt = notiTimeOf(ex);
+    var roomKey = notiRoomKeyOf(sbn, ex);
+
+    var roomToSave = notiRoomOf(ex, isGroup, ntitle);
+    // 방 제목 자리에서 발신자명이 나왔으면 그건 방 제목이 아니다. 추측하지 않는다.
+    if (msgSender && normRoom(roomToSave) === normRoom(msgSender) && isGroup) roomToSave = '';
+    // 이름은 못 얻었지만 방 구분은 되는 경우 — 이름을 지어 붙여 #등록 이라도 되게 한다.
+    var roomFromKey = false;
+    if (!roomToSave && roomKey) {
+      roomToSave = ROOM_ID_PREFIX + roomKey;
+      roomFromKey = true;
     }
 
-    var realRoom = convo || sub;
-    var roomToSave = (realRoom && realRoom !== ntitle) ? realRoom : '';
+    _notiSeen = true;
+
+    // 알림마다 남긴다. 한 번만 찍던 때는 카톡이 같이 띄우는 빈 요약 알림이 첫 줄을 차지해
+    // "알림에 아무것도 없다" 로 보였다(실측 2026-08-12). 본문은 길이만 남긴다 —
+    // 개인 카톡 본문이 로그에 쌓이면 안 된다.
+    if (NOTI_DEBUG) {
+      Log.i('kakao-bot[NOTI] room="' + roomToSave + '"' + (roomFromKey ? '(열쇠)' : '')
+        + ' sender="' + sender + '" group=' + isGroup
+        + ' body=' + (notiBody ? String(notiBody).length + '자' : '없음'));
+
+      // ★ 방마다 이 값이 다른지 확인하는 줄이다. 두 방에서 tag·id 가 같게 나오면
+      //   그 열쇠로는 방을 못 가른다(모든 방이 한 방으로 합쳐진다).
+      Log.i('kakao-bot[NOTI-KEY] ' + notiIdentityLog(sbn, ex));
+
+      // 방 제목이 어느 칸에 실려오는지도 남긴다. 이 단말은 전부 빈 값이지만, 카톡 업데이트나
+      // 다른 단말에서 값이 생기면 이름 기반으로 되돌아갈 수 있다.
+      var cand = [];
+      for (var ci = 0; ci < ROOM_TITLE_KEYS.length; ci++) {
+        var ck = ROOM_TITLE_KEYS[ci];
+        cand.push(ck.replace('android.', '') + '="' + exStr(ex, ck) + '"');
+      }
+      cand.push('title="' + ntitle + '"');
+      Log.i('kakao-bot[NOTI-CAND] ' + cand.join(' '));
+
+      // extras 에 어떤 키가 실려오는지 한 번만 덤프한다. 값이 아니라 키 이름만 남긴다.
+      if (!_notiKeysLogged) {
+        _notiKeysLogged = true;
+        try {
+          var ks = ex.keySet().toArray();
+          var names = [];
+          for (var ki = 0; ki < ks.length; ki++) names.push(String(ks[ki]));
+          Log.i('kakao-bot[NOTI-KEYS] ' + names.join(' '));
+        } catch (eK) { Log.e('kakao-bot[NOTI-KEYS] 덤프 실패: ' + eK); }
+      }
+    }
+
+    if (!roomToSave) {
+      // getKey() 까지 실패한 경우. 여기까지 오면 이 알림으로 할 수 있는 게 없다.
+      Log.e('kakao-bot[NOTI] 방을 특정할 수 없다 — ' + notiIdentityLog(sbn, ex));
+    }
+
+    // 이 방으로 나갈 답장 통로를 잡아둔다. API2 가 없는 단말에서는 이것이 유일한 발신 경로다.
+    captureReplyAction(sbn, roomToSave);
 
     // 사진은 "규칙에 걸리는 방" + "사진 알림" 일 때만 꺼낸다.
     //
@@ -1137,11 +1623,42 @@ function handleKakaoNoti(sbn) {
       notiImage = extractNotiImage(ex);
     }
 
-    // 방 제목이 발신자명과 같으면 방 이름으로 저장하지 않는다(그건 방 제목이 아니다).
-    // 본문 전문은 잘림 복원에 쓰이므로 그래도 남긴다.
-    _rememberNoti(ntitle, roomToSave, notiBody, notiImage);
+    _rememberNoti(sender, roomToSave, notiBody, notiImage);
+
+    if (NOTI_INGEST && roomToSave && sender) {
+      // 카톡은 같은 알림을 다시 올린다. 메시지 자신의 시각이 한참 지난 것이면 이미 처리한
+      // 메시지의 재게시로 본다 — 안 그러면 재게시마다 새 ts 가 붙어 서버에 중복 저장된다.
+      if (msgAt && (_now() - msgAt) > NOTI_STALE_MS) {
+        if (NOTI_DEBUG) Log.i('kakao-bot[NOTI] 재게시로 판단 — 수집 생략');
+      } else {
+        ingestFromNoti(roomToSave, notiBody, sender, isGroup, notiImage,
+          msgAt ? isoFromMillis(msgAt) : '');
+      }
+    }
   } catch (eN) {
     Log.e('kakao-bot[NOTI] 파싱 예외: ' + eN);
+  }
+}
+
+/**
+ * 알림에서 곧바로 수집한다. 알림 콜백은 메인 스레드로 오는 단말이 있어
+ * (NetworkOnMainThreadException) 네트워크는 반드시 별도 스레드에서 돈다.
+ */
+function ingestFromNoti(room, text, sender, isGroup, imageB64, ts) {
+  try {
+    if (!trimText(text) && !imageB64) return;
+    var t = new java.lang.Thread(new java.lang.Runnable({
+      run: function () {
+        try {
+          handleMessage(room, text, sender, isGroup, imageB64, null, null, null, ts);
+        } catch (e) { Log.e('kakao-bot[NOTI] 수집 예외: ' + e); }
+      }
+    }));
+    t.setDaemon(true);
+    t.start();
+  } catch (eT) {
+    // 스레드를 못 만들면 조용히 포기한다 — response 콜백 경로가 같은 메시지를 다시 들고 온다.
+    Log.e('kakao-bot[NOTI] 수집 스레드 생성 실패: ' + eT);
   }
 }
 
@@ -1151,6 +1668,10 @@ function onNotificationPosted(sbn) {
 }
 
 // ── 진입점: API2 (권장) ───────────────────────────────────────
+
+// 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
+// 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
+Log.i('kakao-bot: 시작 v2026-08-12j DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
@@ -1219,10 +1740,10 @@ try {
           // 교정한다. 접두어 규칙이 걸리려면 방 제목이 정확해야 한다.
           try {
             var realRoom = _lookupNotiRoom(sname, ctext);
-            if (realRoom) {
+            if (realRoom && normRoom(realRoom) !== normRoom(rname)) {
               if (rname === sname || !rname) grp = true;
               rname = realRoom;
-            } else if (rname === sname) {
+            } else if (!realRoom && rname === sname) {
               // 방 제목 복원 실패 — 이 상태로는 규칙이 걸리지 않아 전송되지 않는다.
               // 카톡에서 방 제목을 지정하면 해결된다.
               Log.e('kakao-bot: 방제목 복원 실패 sender=' + sname + ' notiOk=' + _notiOk);
@@ -1241,6 +1762,7 @@ try {
           // Rhino 에서 메서드만 떼면 this 가 풀리기 때문이다.
           var replyFn = null;
           try { if (chat && chat.reply) replyFn = function (t) { return chat.reply(t); }; } catch (eRp) {}
+          rememberReplier(rname, rname, replyFn);
 
           handleMessage(rname, ctext, sname, grp, img, chId, logId, replyFn);
         } catch (eMain) {
@@ -1287,14 +1809,16 @@ function response(room, msg, sender, isGroupChat, replier, imageDB, packageName)
     var rname = room;
     var grp = isGroupChat;
     var realRoom = _lookupNotiRoom(sender, msg);
-    if (realRoom) {
+    if (realRoom && normRoom(realRoom) !== normRoom(room)) {
       rname = realRoom;
       grp = true;
-    } else if (room === sender) {
-      // 복원 실패 — 이 상태로는 규칙이 걸리지 않아 전송되지 않는다.
+    }
+    if (normRoom(rname) === normRoom(sender)) {
+      // 방 이름 자리에 발신자명이 그대로 있다. 1:1 개인 카톡이면 정상이고(규칙에 없으니
+      // 수집되지 않는다), 단톡방이면 복원 실패다 — 그 방은 #등록 도 거부된다.
       // notiHook=false 면 이 단말이 onNotificationPosted 를 지원하지 않는 것이고,
-      // true 인데 실패면 방 제목이 없거나 알림 본문이 이 메시지와 맞지 않는 것이다.
-      Log.e('kakao-bot[구API] 방제목 복원 실패 sender="' + sender + '" notiHook=' + _notiSeen);
+      // true 인데 실패면 알림에 방 제목이 없거나 알림 본문이 이 메시지와 맞지 않는 것이다.
+      Log.i('kakao-bot[구API] 방 이름 = 발신자명 sender="' + sender + '" notiHook=' + _notiSeen);
     }
 
     var img = extractImage(null, imageDB, isPhoto);
@@ -1305,6 +1829,15 @@ function response(room, msg, sender, isGroupChat, replier, imageDB, packageName)
 
     var replyFn = null;
     try { if (replier && replier.reply) replyFn = function (t) { return replier.reply(t); }; } catch (eRp) {}
+    // 발신 통로로 걸어둔다. 서버는 교정된 이름으로 내려보내므로 그 이름으로 건다.
+    // 수집을 건너뛰더라도 이건 반드시 해둔다 — 구 API 의 replier 가 이 단말의 주 발신 경로다.
+    rememberReplier(rname, room, replyFn);
+
+    // 알림 훅에 우선권을 준다. 이 단말에서 구 API 의 room 은 늘 발신자명이라 방 이름이
+    // 틀리고, 알림 훅은 열쇠로 제대로 붙인다. 두 경로가 같은 메시지를 각각 올리면 같은 말이
+    // 서로 다른 두 방에 쌓이므로, 여기서 잠깐 기다렸다가 알림 훅이 안 가져갔을 때만 올린다.
+    // (알림 훅이 죽은 단말에서 수집이 통째로 멈추지 않게 하려는 폴백이다.)
+    try { java.lang.Thread.sleep(RESPONSE_YIELD_MS); } catch (eY) {}
 
     handleMessage(rname, msg, sender, grp, img, null, null, replyFn);
   } catch (e) {
