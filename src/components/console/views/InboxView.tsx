@@ -73,6 +73,11 @@ type Filter = 'all' | 'unhandled' | 'pinned';
  * 그 아래로 내리려면 폴링이 아니라 Supabase Realtime 으로 바꿔야 한다.
  */
 const POLL_MS = 10_000;
+// 아무것도 안 바뀌면 주기를 늘린다. 거래처 메시지는 시간당 몇 건이라 10초 고정이면 응답의
+// 대부분이 "변한 것 없음" 이고, 그 빈 응답 하나하나가 서버리스 호출로 과금된다
+// (미들웨어가 매 요청 Supabase auth 왕복을 한 번 더 한다). 새 메시지가 오거나 탭으로
+// 돌아오거나 발신 대기가 생기면 곧바로 10초로 되돌아온다.
+const POLL_MAX_MS = 60_000;
 
 const COLORS = ['blue', 'green', 'amber', 'red', 'purple', 'gray'] as const;
 const COLOR_LABELS: Record<string, string> = {
@@ -219,18 +224,39 @@ export function InboxView({ data }: { data: InboxViewData }) {
   }, [activeId]);
 
   /**
-   * 30초마다 방 목록을 다시 받아온다. 봇이 메시지를 올려도 이 화면은 스스로 알 방법이 없어
+   * 주기적으로 방 목록을 다시 받아온다. 봇이 메시지를 올려도 이 화면은 스스로 알 방법이 없어
    * 새로고침 전까지 옛 상태로 남아 있었다.
    *
    * 탭이 보일 때만 돈다. 사무실에서 하루종일 열어두는 화면이라, 백그라운드 탭·잠긴 화면에서도
    * 계속 부르면 아무도 안 보는 응답을 밤새 만들어내게 된다.
+   *
+   * 보이는 동안에도 변화가 없으면 10초 → 20 → 40 → 60초로 늦춘다. 거래처 메시지는 시간당
+   * 몇 건이라 10초 고정이면 응답의 대부분이 빈 응답이고, 그 하나하나가 서버리스 호출로
+   * 과금된다(미들웨어가 매 요청 Supabase auth 왕복을 한 번 더 한다). 새 메시지·발신 대기·
+   * 탭 복귀 중 하나만 있어도 즉시 10초로 돌아오므로 체감은 그대로다.
    */
   useEffect(() => {
     let stopped = false;
+    // 연속으로 "변한 것 없음" 이 나온 횟수. 늘어날수록 주기를 두 배씩 늘린다.
+    let idleStreak = 0;
+    let lastFingerprint = '';
+
+    function nextDelay() {
+      let delay = POLL_MS;
+      for (let i = 0; i < idleStreak && delay < POLL_MAX_MS; i++) delay *= 2;
+      return Math.min(delay, POLL_MAX_MS);
+    }
+
+    /** 목록이 실제로 달라졌는지 보는 값싼 지문. 전체 비교 대신 이것만 본다. */
+    function fingerprint(list: InboxRoom[]) {
+      return list.map((r) => `${r.id}:${r.lastMessageAt ?? ''}:${r.messageCount}`).join('|');
+    }
 
     async function poll() {
       if (stopped) return;
-      if (document.visibilityState !== 'visible') return;
+      // 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
+      // 시작하면 "새로고침해야 뜨네" 로 느껴진다.
+      if (document.visibilityState !== 'visible') { idleStreak = 0; return; }
       if (writesInFlight.current > 0) return;
 
       try {
@@ -242,6 +268,12 @@ export function InboxView({ data }: { data: InboxViewData }) {
 
         const before = roomsRef.current;
         setRooms(next);
+
+        // 발신 대기가 남아 있으면 사람이 "나갔나" 를 기다리는 중이다. 늦추지 않는다.
+        const fp = fingerprint(next);
+        if (fp !== lastFingerprint || pendingRef.current) idleStreak = 0;
+        else idleStreak += 1;
+        lastFingerprint = fp;
 
         // 열어둔 방에 새 메시지가 있을 때만 대화를 다시 받는다. 매 주기마다 전체 대화를
         // 받으면 방 하나에 300건씩 실려 와 폴링 비용이 목록의 수십 배가 된다.
@@ -269,14 +301,21 @@ export function InboxView({ data }: { data: InboxViewData }) {
 
     // 탭으로 돌아오면 30초를 기다리지 않고 즉시 한 번 — 다른 일 하다 온 사이 쌓인 것을 바로 보여준다.
     function onVisible() {
-      if (document.visibilityState === 'visible') void poll();
+      if (document.visibilityState !== 'visible') return;
+      idleStreak = 0; // 돌아오자마자는 빠르게
+      void poll();
     }
 
-    const timer = setInterval(() => void poll(), POLL_MS);
+    let timer = window.setTimeout(function tick() {
+      void poll().finally(() => {
+        if (!stopped) timer = window.setTimeout(tick, nextDelay());
+      });
+    }, POLL_MS);
+
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       stopped = true;
-      clearInterval(timer);
+      clearTimeout(timer);
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
