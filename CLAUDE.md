@@ -237,6 +237,26 @@ summaryText → infoText) 순으로 찾는다. 카톡이 화면에 안 띄우는
 회사 고유 문자열은 전부 `src/lib/brand.ts` + `NEXT_PUBLIC_BRAND_*` 로 뺐다.
 새 하드코딩을 넣지 말 것.
 
+## ⚠️ Supabase 프로젝트를 linktalk 과 함께 쓴다
+
+같은 DB 에 앱이 둘 있다. 테이블 이름이 겹치지 않아 평소엔 안 보이지만, **소속 판정만은 공유**한다.
+
+| 앱 | 소속 테이블 | 테이블 |
+|---|---|---|
+| linktalk | `workspace_members` (역할 없음) | threads, messages, customers, subscriptions … |
+| 이 앱 | `memberships` (owner/admin/viewer) | kakao_*, partners, partner_room_rules, invitations |
+
+`workspaces` · `profiles` · RLS 헬퍼 `is_workspace_member()` 는 둘이 같이 쓴다. 그래서 이 함수는
+**두 테이블의 합집합**을 본다(`0005_shared_membership.sql`). 한쪽만 보게 바꾸면 반대쪽 앱이
+통째로 막힌다.
+
+`0001_base.sql` 에는 이 함수가 `memberships` 만 보도록 적혀 있다 — **운영 DB 에 재실행하지 말 것.**
+`migrate-all.local.sql` 도 같다(맨 앞에서 테이블을 DROP 한다).
+
+증상 기억해둘 것: 권한을 줬는데 화면에 **"열람"** 으로 뜨고 카톡방이 0개면 역할이 `null` 이라는
+뜻이고, 대개 RLS 가 `memberships` 행 자체를 가린 것이다. 역할 조회가 null 이면 화면은 '열람'
+으로 표시되므로 권한 설정 실수처럼 보인다(2026-08-13).
+
 ## 개인정보
 
 - 거래처 방 대화는 원문 그대로 저장한다(마스킹 없음). 접근 통제는 RLS 에 의존한다.
