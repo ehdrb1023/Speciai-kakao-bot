@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Ic } from '../IconDefs';
 import { EmptyState } from '../EmptyState';
 import { navigateConsole } from '../nav';
+import { useTabActive } from '../tab-active';
 import { seoulClock, seoulDateKey, seoulDayLabel, seoulMonthDayTime } from '@/lib/time';
 
 export interface InboxRoom {
@@ -114,6 +115,13 @@ export function InboxView({ data }: { data: InboxViewData }) {
   const active = rooms.find((r) => r.id === activeId) ?? null;
   const activeMessages = activeId ? messages[activeId] : undefined;
   const activeOutbound = (activeId ? outbound[activeId] : undefined) ?? [];
+
+  // 다른 탭을 보는 동안에는 이 화면이 살아만 있고 네트워크는 쓰지 않는다(tab-active.tsx 참고).
+  const tabActive = useTabActive();
+  const tabActiveRef = useRef(tabActive);
+  tabActiveRef.current = tabActive;
+  /** 폴링 루프 안의 poll 을 밖에서 한 번 부르기 위한 통로. 탭으로 돌아온 순간에 쓴다. */
+  const pollNowRef = useRef<(() => Promise<void>) | null>(null);
 
   // 대기 중인 발신이 있으면 폴링이 대화를 매 주기 다시 받아야 한다. 방 목록의 lastMessageAt
   // 만 보면 "보냈는지" 가 안 바뀌고, 사람은 그 상태를 기다리며 화면을 보고 있다.
@@ -256,7 +264,8 @@ export function InboxView({ data }: { data: InboxViewData }) {
       if (stopped) return;
       // 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
       // 시작하면 "새로고침해야 뜨네" 로 느껴진다.
-      if (document.visibilityState !== 'visible') { idleStreak = 0; return; }
+      // 다른 탭(거래처·봇 연동)을 보는 중일 때도 같다. 이 화면은 살아 있지만 아무도 안 본다.
+      if (document.visibilityState !== 'visible' || !tabActiveRef.current) { idleStreak = 0; return; }
       if (writesInFlight.current > 0) return;
 
       try {
@@ -306,6 +315,11 @@ export function InboxView({ data }: { data: InboxViewData }) {
       void poll();
     }
 
+    pollNowRef.current = async () => {
+      idleStreak = 0;
+      await poll();
+    };
+
     let timer = window.setTimeout(function tick() {
       void poll().finally(() => {
         if (!stopped) timer = window.setTimeout(tick, nextDelay());
@@ -316,9 +330,24 @@ export function InboxView({ data }: { data: InboxViewData }) {
     return () => {
       stopped = true;
       clearTimeout(timer);
+      pollNowRef.current = null;
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
+
+  // 이 탭으로 돌아온 순간 즉시 한 번 받아온다. 다른 탭을 보는 동안 폴링을 멈춰둔 만큼
+  // 화면이 뒤처져 있고, 주기를 기다리게 하면 결국 "새로고침해야 뜨네" 와 같아진다.
+  // 첫 mount 는 서버가 방금 준 값이라 건너뛴다.
+  const wasTabActive = useRef(true);
+  useEffect(() => {
+    if (!tabActive) {
+      wasTabActive.current = false;
+      return;
+    }
+    if (wasTabActive.current) return;
+    wasTabActive.current = true;
+    void pollNowRef.current?.();
+  }, [tabActive]);
 
   async function patchRoom(roomId: string, patch: { pinned?: boolean; handled?: boolean; color?: string | null }) {
     // 낙관적 갱신 — 토글 반응이 왕복 지연만큼 늦으면 두 번 누르게 된다.

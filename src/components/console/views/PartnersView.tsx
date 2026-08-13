@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState, useTransition } from 'react';
 import { Ic } from '../IconDefs';
 import { EmptyState } from '../EmptyState';
+import { useTabActive } from '../tab-active';
 import type { PartnerRow, RuleRow, BoundRoomRow } from '@/server/actions/partners';
 import type { RoomRuleKind } from '@/server/kakao/rules';
 import { seoulMonthDayTime } from '@/lib/time';
@@ -96,6 +97,11 @@ export function PartnersView({
 
   const liveRef = useRef(live);
   liveRef.current = live;
+  // 다른 탭을 보는 동안에는 이 화면이 살아만 있고 네트워크는 쓰지 않는다(tab-active.tsx 참고).
+  const tabActive = useTabActive();
+  const tabActiveRef = useRef(tabActive);
+  tabActiveRef.current = tabActive;
+  const pollNowRef = useRef<(() => Promise<void>) | null>(null);
   // 쓰기가 진행 중이면 그 주기는 건너뛴다 — 방금 누른 것이 폴링 결과에 덮여 되돌아가지 않게.
   const pendingRef = useRef(pending);
   pendingRef.current = pending;
@@ -122,7 +128,8 @@ export function PartnersView({
       if (stopped) return;
       // 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
       // 시작하면 "새로고침해야 뜨네" 로 느껴진다.
-      if (document.visibilityState !== 'visible') {
+      // 다른 탭(받은 카톡·봇 연동)을 보는 중일 때도 같다. 이 화면은 살아 있지만 아무도 안 본다.
+      if (document.visibilityState !== 'visible' || !tabActiveRef.current) {
         idleStreak = 0;
         return;
       }
@@ -158,6 +165,11 @@ export function PartnersView({
       void poll();
     }
 
+    pollNowRef.current = async () => {
+      idleStreak = 0;
+      await poll();
+    };
+
     let timer = window.setTimeout(function tick() {
       void poll().finally(() => {
         if (!stopped) timer = window.setTimeout(tick, nextDelay());
@@ -168,9 +180,22 @@ export function PartnersView({
     return () => {
       stopped = true;
       clearTimeout(timer);
+      pollNowRef.current = null;
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, []);
+
+  // 이 탭으로 돌아온 순간 즉시 한 번. 다른 탭에 있는 동안 멈춰둔 만큼 화면이 뒤처져 있다.
+  const wasTabActive = useRef(true);
+  useEffect(() => {
+    if (!tabActive) {
+      wasTabActive.current = false;
+      return;
+    }
+    if (wasTabActive.current) return;
+    wasTabActive.current = true;
+    void pollNowRef.current?.();
+  }, [tabActive]);
 
   return (
     <>

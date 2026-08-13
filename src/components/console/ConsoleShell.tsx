@@ -6,6 +6,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { IconDefs, Ic } from './IconDefs';
 import { CV2_NAV_EVENT, type Cv2NavDetail } from './nav';
+import { TabActiveProvider } from './tab-active';
 
 export type ViewKey = 'kakao' | 'partners' | 'link' | 'settings';
 
@@ -48,9 +49,23 @@ export function ConsoleShell({
   signOutAction: () => Promise<void>;
 }) {
   const [view, setView] = useState<ViewKey>(initialView);
+  // 한 번이라도 연 탭은 계속 살려둔다. 탭을 옮길 때마다 언마운트하면 그 화면의 상태가 전부
+  // 사라지고(방 목록·불러온 대화·쓰다 만 초안·스크롤·폴링으로 받아둔 최신 목록), 돌아왔을 때
+  // 페이지를 처음 열던 시점의 값으로 되돌아간다. 폴링 타이머도 0부터 다시 시작해 첫 갱신을
+  // 또 기다리게 된다.
+  //
+  // 처음부터 전부 그리지 않는 이유는 그대로다 — 첫 화면이 느려지고, 코드분할(dynamic import)
+  // 해둔 탭의 청크를 안 볼 사람도 받게 된다. 안 보는 탭은 CSS(.view{display:none})가 감추고,
+  // 폴링은 TabActiveProvider 가 멈춘다.
+  const [visited, setVisited] = useState<ViewKey[]>([initialView]);
   const [signingOut, setSigningOut] = useState(false);
   const avatar = userName.charAt(0) || '·';
   const navItems = NAV.filter((n) => !n.adminOnly || isAdmin);
+
+  // 탭 버튼·navigateConsole 어느 쪽으로 옮겨왔든 한 곳에서 기록한다.
+  useEffect(() => {
+    setVisited((prev) => (prev.includes(view) ? prev : [...prev, view]));
+  }, [view]);
 
   // 뷰 간 이동(navigateConsole) 수신 → 탭 전환.
   useEffect(() => {
@@ -138,7 +153,9 @@ export function ConsoleShell({
         <div className="inner" style={{ paddingBottom: 48 }}>
           {navItems.map((n) => (
             <section key={n.key} className={`view${view === n.key ? ' on' : ''}`} id={`v-${n.key}`}>
-              {view === n.key ? slots[n.key] : null}
+              {visited.includes(n.key) ? (
+                <TabActiveProvider value={view === n.key}>{slots[n.key]}</TabActiveProvider>
+              ) : null}
             </section>
           ))}
         </div>
