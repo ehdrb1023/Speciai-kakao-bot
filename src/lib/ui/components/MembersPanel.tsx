@@ -12,6 +12,14 @@ export interface MemberRow {
   isSelf: boolean;
 }
 
+/** 가입은 했지만 이 워크스페이스에 아직 못 들어온 계정. */
+export interface PendingAccountRow {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  createdAt: string;
+}
+
 export interface InvitationRow {
   id: string;
   email: string;
@@ -34,6 +42,12 @@ interface MembersPanelProps {
   changeRoleAction: (data: { userId: string; role: 'owner' | 'admin' | 'viewer' }) => Promise<{ error?: string }>;
   removeMemberAction: (data: { userId: string }) => Promise<{ error?: string }>;
   cancelInviteAction: (data: { invitationId: string }) => Promise<{ error?: string }>;
+  /**
+   * 가입 대기 계정과 권한 부여 액션. 둘 다 있을 때만 그 섹션을 그린다 —
+   * 이 컴포넌트를 쓰는 다른 앱은 초대 링크 방식만 쓸 수도 있다.
+   */
+  pendingAccounts?: PendingAccountRow[];
+  grantAccessAction?: (data: { userId: string; role: 'admin' | 'viewer' }) => Promise<{ error?: string }>;
 }
 
 const roleLabel: Record<MemberRow['role'], string> = {
@@ -51,6 +65,8 @@ export function MembersPanel({
   changeRoleAction,
   removeMemberAction,
   cancelInviteAction,
+  pendingAccounts,
+  grantAccessAction,
 }: MembersPanelProps) {
   const [email, setEmail] = useState('');
   const [role, setRole] = useState<'admin' | 'viewer'>('admin');
@@ -117,6 +133,56 @@ export function MembersPanel({
               <code>{link}</code>
             </div>
           )}
+        </section>
+      )}
+
+      {/* 가입 대기 — 회사 메일로 가입은 했지만 아직 권한이 없는 계정. 초대 링크 없이 여기서 붙인다. */}
+      {canManage && grantAccessAction && pendingAccounts && pendingAccounts.length > 0 && (
+        <section className="members-section">
+          <div className="members-section-title">가입 대기 ({pendingAccounts.length}명)</div>
+          <div className="members-sub" style={{ marginBottom: 10 }}>
+            회사 메일로 가입했지만 아직 아무것도 볼 수 없는 계정입니다. 권한을 주면 그때부터
+            거래처 카톡이 보입니다.
+          </div>
+          <div className="members-list">
+            {pendingAccounts.map((p) => (
+              <div key={p.userId} className="member-row">
+                <div className="member-avatar member-avatar-pending">
+                  {(p.displayName || p.email).slice(0, 1).toUpperCase()}
+                </div>
+                <div className="member-body">
+                  <div className="member-name">{p.displayName || p.email.split('@')[0]}</div>
+                  <div className="member-email">
+                    {p.email} · {seoulDate(p.createdAt)} 가입
+                  </div>
+                </div>
+                <button
+                  className="btn-sm primary"
+                  disabled={submitting}
+                  onClick={async () => {
+                    setSubmitting(true);
+                    const r = await grantAccessAction({ userId: p.userId, role: 'admin' });
+                    setMsg(r.error ? `실패: ${r.error}` : `${p.email} 에게 관리자 권한을 주었습니다`);
+                    setSubmitting(false);
+                  }}
+                >
+                  관리자로
+                </button>
+                <button
+                  className="btn-sm"
+                  disabled={submitting}
+                  onClick={async () => {
+                    setSubmitting(true);
+                    const r = await grantAccessAction({ userId: p.userId, role: 'viewer' });
+                    setMsg(r.error ? `실패: ${r.error}` : `${p.email} 에게 열람 권한을 주었습니다`);
+                    setSubmitting(false);
+                  }}
+                >
+                  열람으로
+                </button>
+              </div>
+            ))}
+          </div>
         </section>
       )}
 

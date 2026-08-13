@@ -3,6 +3,7 @@
 import { cookies, headers } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import { createSupabaseServerClient, getSession } from '@/lib/auth/server';
+import { canManageMembers } from '@/lib/auth';
 import { getServerClient } from '@/lib/db';
 import { logAudit } from '../audit';
 import { BRAND } from '@/lib/brand';
@@ -68,8 +69,82 @@ export async function invite(data: { email: string; role: 'admin' | 'viewer' }) 
     },
   });
 
-  revalidatePath('/settings/members');
+  // 이 앱의 콘솔은 '/' 한 페이지다. 예전 경로를 무효화하면 아무 일도 안 일어나 화면이 안 바뀐다.
+  revalidatePath('/');
   return { inviteUrl, emailSent: sendResult.sent, emailError: sendResult.error };
+}
+
+/** 가입은 했지만 이 워크스페이스에 아직 못 들어온 계정. */
+export interface PendingAccountRow {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  createdAt: string;
+}
+
+/**
+ * 가입 대기 목록.
+ *
+ * 초대 링크를 주고받는 대신, 회사 메일로 가입한 사람을 여기서 보고 권한을 준다.
+ * 가입 자체가 @speciai.ai.kr 로 막혀 있어(signup-policy.ts) 여기 뜨는 것은 사내 사람뿐이다.
+ *
+ * service-role 을 쓰는 이유: profiles 의 RLS 는 "나 자신 + 같은 워크스페이스 멤버" 만 읽게
+ * 한다. 아직 멤버가 아닌 사람이 목적이라 세션 클라이언트로는 영영 안 보인다.
+ * 인가는 아래 role 검사가 한다.
+ */
+export async function listPendingAccounts(): Promise<PendingAccountRow[]> {
+  const session = await getSession(await cookies());
+  if (!session?.workspaceId) return [];
+  if (!canManageMembers(session.role)) return [];
+
+  const sb = getServerClient();
+  const [{ data: profiles }, { data: members }] = await Promise.all([
+    sb.from('profiles').select('id, email, display_name, created_at').order('created_at'),
+    sb.from('memberships').select('user_id').eq('workspace_id', session.workspaceId),
+  ]);
+
+  const joined = new Set((members ?? []).map((m) => m.user_id as string));
+  return (profiles ?? [])
+    .filter((p) => !joined.has(p.id as string))
+    .map((p) => ({
+      userId: p.id as string,
+      email: p.email as string,
+      displayName: (p.display_name as string | null) ?? null,
+      createdAt: p.created_at as string,
+    }));
+}
+
+/**
+ * 가입한 계정에 이 워크스페이스 권한을 준다. 초대 토큰 없이 관리자가 직접 붙이는 경로다.
+ *
+ * 그 사람의 기본 워크스페이스도 여기로 바꾼다 — 가입할 때 자기 워크스페이스가 생겨 있으면
+ * 로그인해도 계속 빈 화면을 보게 된다. 남의 프로필은 RLS 로 못 고치므로 service-role 을 쓴다.
+ */
+export async function grantAccess(data: { userId: string; role: 'admin' | 'viewer' }) {
+  const session = await getSession(await cookies());
+  if (!session?.workspaceId) return { error: '워크스페이스가 없습니다' };
+  if (!canManageMembers(session.role)) return { error: '권한이 없습니다' };
+  if (data.role !== 'admin' && data.role !== 'viewer') return { error: '알 수 없는 역할입니다' };
+
+  const sb = getServerClient();
+  const { error } = await sb
+    .from('memberships')
+    .upsert(
+      { workspace_id: session.workspaceId, user_id: data.userId, role: data.role },
+      { onConflict: 'workspace_id,user_id' },
+    );
+  if (error) return { error: error.message };
+
+  await sb.from('profiles').update({ current_workspace_id: session.workspaceId }).eq('id', data.userId);
+
+  await logAudit({
+    action: 'member.grant',
+    targetTable: 'memberships',
+    targetId: data.userId,
+    meta: { role: data.role },
+  });
+  revalidatePath('/');
+  return {};
 }
 
 export async function changeRole(data: { userId: string; role: 'owner' | 'admin' | 'viewer' }) {
@@ -91,7 +166,8 @@ export async function changeRole(data: { userId: string; role: 'owner' | 'admin'
     targetId: data.userId,
     meta: { role: data.role },
   });
-  revalidatePath('/settings/members');
+  // 이 앱의 콘솔은 '/' 한 페이지다. 예전 경로를 무효화하면 아무 일도 안 일어나 화면이 안 바뀐다.
+  revalidatePath('/');
   return {};
 }
 
@@ -108,12 +184,19 @@ export async function removeMember(data: { userId: string }) {
     .eq('user_id', data.userId);
 
   if (error) return { error: error.message };
+
+  // 기본 워크스페이스도 비운다. 멤버십만 지우면 그 사람 세션은 workspaceId 는 있는데 역할이
+  // 없는 상태가 되어, 로그인했을 때 아무것도 안 들어찬 콘솔을 보게 된다. 남의 프로필은
+  // RLS 로 못 고치므로 service-role 로 지운다.
+  await getServerClient().from('profiles').update({ current_workspace_id: null }).eq('id', data.userId);
+
   await logAudit({
     action: 'member.remove',
     targetTable: 'memberships',
     targetId: data.userId,
   });
-  revalidatePath('/settings/members');
+  // 이 앱의 콘솔은 '/' 한 페이지다. 예전 경로를 무효화하면 아무 일도 안 일어나 화면이 안 바뀐다.
+  revalidatePath('/');
   return {};
 }
 
@@ -135,7 +218,8 @@ export async function cancelInvite(data: { invitationId: string }) {
     targetTable: 'invitations',
     targetId: data.invitationId,
   });
-  revalidatePath('/settings/members');
+  // 이 앱의 콘솔은 '/' 한 페이지다. 예전 경로를 무효화하면 아무 일도 안 일어나 화면이 안 바뀐다.
+  revalidatePath('/');
   return {};
 }
 

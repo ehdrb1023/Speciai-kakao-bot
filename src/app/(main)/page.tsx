@@ -17,7 +17,14 @@ import {
   adoptUnmatchedRoom,
   dismissUnmatchedRoom,
 } from '@/server/actions/partners';
-import { invite, changeRole, removeMember, cancelInvite } from '@/server/actions/members';
+import {
+  invite,
+  changeRole,
+  removeMember,
+  cancelInvite,
+  listPendingAccounts,
+  grantAccess,
+} from '@/server/actions/members';
 import { saveStaffAliases, saveDisplayName } from '@/server/actions/workspace';
 import { signOut } from '@/server/actions/auth';
 
@@ -108,6 +115,9 @@ export default async function Page() {
     canSend: session.role !== 'viewer',
     unmatchedCount: unmatched.length,
   };
+
+  // 가입은 했지만 아직 이 워크스페이스에 못 들어온 계정. 관리자에게만 의미가 있어 여기서만 부른다.
+  const pendingAccounts = canEdit ? await listPendingAccounts() : [];
 
   const linkedRoomCount = partners.reduce((sum, p) => sum + p.rooms.length, 0);
   const unhandled = rooms.filter((r) => !r.handled).length;
@@ -207,6 +217,8 @@ export default async function Page() {
               changeRoleAction={changeRole}
               removeMemberAction={removeMember}
               cancelInviteAction={cancelInvite}
+              pendingAccounts={pendingAccounts}
+              grantAccessAction={grantAccess}
             />
           </>
         ),

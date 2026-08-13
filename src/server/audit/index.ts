@@ -20,6 +20,9 @@ export type AuditAction =
   | 'kakao.room.delete'
   | 'kakao.room.restore'
   | 'member.invite'
+  // 초대 토큰 없이 관리자가 가입 계정에 권한을 붙인 것. 초대 수락과 구분해서 남긴다 —
+  // "누가 이 사람을 들여보냈나" 를 나중에 따질 때 경로가 다르면 답도 달라진다.
+  | 'member.grant'
   | 'member.role_change'
   | 'member.remove'
   | 'invite.cancel'
