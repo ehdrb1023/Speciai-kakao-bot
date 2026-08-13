@@ -1,6 +1,7 @@
 import { cookies } from 'next/headers';
 import { NextResponse, type NextRequest } from 'next/server';
 import { createSupabaseServerClient } from '@/lib/auth/server';
+import { getServerClient } from '@/lib/db';
 
 function slugify(s: string): string {
   return (
@@ -38,6 +39,35 @@ export async function GET(req: NextRequest) {
       .select('current_workspace_id, display_name, email')
       .eq('id', user.id)
       .maybeSingle();
+
+    // 초대받은 사람에게는 워크스페이스를 만들어주지 않는다.
+    //
+    // 예전에는 가입만 하면 무조건 자기 워크스페이스가 생겼다. 그래서 팀원을 초대해도
+    // 그 사람은 **텅 빈 자기 워크스페이스**로 들어가 "아무것도 없는데요" 를 보게 되고,
+    // 초대를 부를 때마다 워크스페이스가 하나씩 늘었다(2026-08-13, 3개까지 늘어난 뒤 발견).
+    // 워크스페이스가 둘 이상이면 봇이 어디에 쌓을지 정하지 못하는 문제와도 이어진다.
+    //
+    // 그래서 대기 중인 초대가 있으면 만들지 않고 수락 화면으로 보낸다. 거기서 이메일이
+    // 맞는지 한 번 더 보고 붙인다(acceptInvite).
+    const email = (user.email ?? profile?.email ?? '').trim().toLowerCase();
+    if (!profile?.current_workspace_id && email) {
+      // 아직 아무 워크스페이스의 멤버가 아니라 invitations 의 RLS 에 걸린다. 조회만
+      // service-role 로 하고, 실제 수락(권한 부여)은 acceptInvite 가 이메일을 대조한 뒤 한다.
+      const { data: pending } = await getServerClient()
+        .from('invitations')
+        .select('token')
+        .eq('email', email)
+        .is('accepted_at', null)
+        .gt('expires_at', new Date().toISOString())
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (pending?.token) {
+        return NextResponse.redirect(
+          `${origin}/auth/invite?token=${encodeURIComponent(pending.token as string)}`,
+        );
+      }
+    }
 
     if (!profile?.current_workspace_id) {
       const base =
