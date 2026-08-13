@@ -65,20 +65,26 @@ export interface InboxViewData {
 type Filter = 'all' | 'unhandled' | 'pinned';
 
 /**
- * 방 목록 폴링 주기.
+ * 이 화면을 보고 있는 동안의 방 목록 폴링 주기.
  *
- * 실측(2026-08-11): 카톡 발신 → 봇 폰 알림 7초 → 대시보드 반영까지 총 17초.
- * 뒤쪽 10초가 이 주기 때문이라 30초에서 10초로 줄였다. 요청은 3배가 되지만 목록만
- * 받아오는 호출이라 Vercel Pro 포함량의 몇 %다.
+ * 실측(2026-08-13, 최근 20건): 거래처가 카톡을 친 시각 → DB 저장까지 **1.6~3.7초**(평균 2.3).
+ * 수집 구간은 이미 빠르다. 사람이 느끼는 지연은 거의 전부 이 주기에서 나온다.
  *
- * 더 줄여도 체감은 별로 나아지지 않는다 — 앞단의 알림 7초가 남아 있어서다.
- * 그 아래로 내리려면 폴링이 아니라 Supabase Realtime 으로 바꿔야 한다.
+ * 예전에는 변화가 없으면 10 → 20 → 40 → 60초로 늦췄다(백오프). 조용한 방을 보고 있으면
+ * 1분 만에 60초 주기가 되고, 2초 만에 DB 에 들어온 메시지가 화면에는 최대 1분 뒤에 떴다.
+ * "많이 느리다" 는 말이 나온 지점이 정확히 여기다(2026-08-13 대표 지시로 백오프 제거).
+ *
+ * 백오프가 실제로 아끼던 구간은 "화면을 켜고 이 탭을 보고 있는 동안" 뿐인데, 그게 바로
+ * 사람이 새 메시지를 기다리는 시간이다. 거기서 아낀 요청값보다 1분 늦게 뜨는 화면이 비싸다.
+ * 아끼는 일은 다른 세 곳이 이미 한다 — 창이 안 보이면 정지, 다른 탭이면 60초(POLL_MAX_MS),
+ * 열어둔 방에 변화가 없으면 대화 본문은 안 받는다.
+ *
+ * 이 아래로 내리려면 주기를 더 줄일 게 아니라 Supabase Realtime 으로 바꿔야 한다.
+ * 남은 2초는 폰 구간이라 주기를 0 으로 해도 사라지지 않는다.
  */
-const POLL_MS = 10_000;
-// 아무것도 안 바뀌면 주기를 늘린다. 거래처 메시지는 시간당 몇 건이라 10초 고정이면 응답의
-// 대부분이 "변한 것 없음" 이고, 그 빈 응답 하나하나가 서버리스 호출로 과금된다
-// (미들웨어가 매 요청 Supabase auth 왕복을 한 번 더 한다). 새 메시지가 오거나 탭으로
-// 돌아오거나 발신 대기가 생기면 곧바로 10초로 되돌아온다.
+const POLL_MS = 5_000;
+// 다른 탭(거래처·봇 연동)을 보는 동안의 주기. 이때 받아오는 이유는 화면이 아니라 탭 배지와
+// 새 카톡 알림 때문이다. 대화 본문은 받지 않는다.
 const POLL_MAX_MS = 60_000;
 
 const COLORS = ['blue', 'green', 'amber', 'red', 'purple', 'gray'] as const;
@@ -247,31 +253,16 @@ export function InboxView({ data }: { data: InboxViewData }) {
    * 주기적으로 방 목록을 다시 받아온다. 봇이 메시지를 올려도 이 화면은 스스로 알 방법이 없어
    * 새로고침 전까지 옛 상태로 남아 있었다.
    *
-   * 탭이 보일 때만 돈다. 사무실에서 하루종일 열어두는 화면이라, 백그라운드 탭·잠긴 화면에서도
+   * 창이 보일 때만 돈다. 사무실에서 하루종일 열어두는 화면이라, 백그라운드 탭·잠긴 화면에서도
    * 계속 부르면 아무도 안 보는 응답을 밤새 만들어내게 된다.
-   *
-   * 보이는 동안에도 변화가 없으면 10초 → 20 → 40 → 60초로 늦춘다. 거래처 메시지는 시간당
-   * 몇 건이라 10초 고정이면 응답의 대부분이 빈 응답이고, 그 하나하나가 서버리스 호출로
-   * 과금된다(미들웨어가 매 요청 Supabase auth 왕복을 한 번 더 한다). 새 메시지·발신 대기·
-   * 탭 복귀 중 하나만 있어도 즉시 10초로 돌아오므로 체감은 그대로다.
    */
   useEffect(() => {
     let stopped = false;
-    // 연속으로 "변한 것 없음" 이 나온 횟수. 늘어날수록 주기를 두 배씩 늘린다.
-    let idleStreak = 0;
-    let lastFingerprint = '';
 
     function nextDelay() {
       // 다른 탭을 보는 중이면 배지·알림을 위한 최소한만 — 가장 느린 주기로 목록만 확인한다.
-      if (!tabActiveRef.current) return POLL_MAX_MS;
-      let delay = POLL_MS;
-      for (let i = 0; i < idleStreak && delay < POLL_MAX_MS; i++) delay *= 2;
-      return Math.min(delay, POLL_MAX_MS);
-    }
-
-    /** 목록이 실제로 달라졌는지 보는 값싼 지문. 전체 비교 대신 이것만 본다. */
-    function fingerprint(list: InboxRoom[]) {
-      return list.map((r) => `${r.id}:${r.lastMessageAt ?? ''}:${r.messageCount}`).join('|');
+      // 보고 있는 동안은 늦추지 않는다(POLL_MS 주석 참고).
+      return tabActiveRef.current ? POLL_MS : POLL_MAX_MS;
     }
 
     /**
@@ -301,9 +292,8 @@ export function InboxView({ data }: { data: InboxViewData }) {
 
     async function poll() {
       if (stopped) return;
-      // 창이 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
-      // 시작하면 "새로고침해야 뜨네" 로 느껴진다.
-      if (document.visibilityState !== 'visible') { idleStreak = 0; return; }
+      // 창이 안 보이는 동안은 부르지 않는다.
+      if (document.visibilityState !== 'visible') return;
       if (writesInFlight.current > 0) return;
       // 다른 탭을 보는 중이면 목록까지만 본다(배지·알림용). 대화 재조회는 아래에서 멈춘다.
       const background = !tabActiveRef.current;
@@ -318,12 +308,6 @@ export function InboxView({ data }: { data: InboxViewData }) {
         const before = roomsRef.current;
         setRooms(next);
         announceNew(before, next, background);
-
-        // 발신 대기가 남아 있으면 사람이 "나갔나" 를 기다리는 중이다. 늦추지 않는다.
-        const fp = fingerprint(next);
-        if (fp !== lastFingerprint || pendingRef.current) idleStreak = 0;
-        else idleStreak += 1;
-        lastFingerprint = fp;
 
         if (background) return;
 
@@ -351,17 +335,13 @@ export function InboxView({ data }: { data: InboxViewData }) {
       }
     }
 
-    // 탭으로 돌아오면 30초를 기다리지 않고 즉시 한 번 — 다른 일 하다 온 사이 쌓인 것을 바로 보여준다.
+    // 창으로 돌아오면 주기를 기다리지 않고 즉시 한 번 — 다른 일 하다 온 사이 쌓인 것을 바로 보여준다.
     function onVisible() {
       if (document.visibilityState !== 'visible') return;
-      idleStreak = 0; // 돌아오자마자는 빠르게
       void poll();
     }
 
-    pollNowRef.current = async () => {
-      idleStreak = 0;
-      await poll();
-    };
+    pollNowRef.current = poll;
 
     let timer = window.setTimeout(function tick() {
       void poll().finally(() => {
