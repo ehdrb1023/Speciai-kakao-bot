@@ -17,6 +17,15 @@ interface SignInFormProps {
   ) => Promise<{ error?: string; ok?: boolean; needsConfirm?: boolean }>;
   /** 비밀번호 재설정 메일 발송 */
   passwordResetAction: (email: string) => Promise<{ error?: string; ok?: boolean }>;
+  /**
+   * 가입 화면에 미리 띄울 안내(예: 허용 도메인).
+   *
+   * 정책 자체는 서버와 DB 훅이 갖고 있다. 여기 문구로 내려받는 이유는 막힐 사람이 이유를
+   * 누르기 전에 알게 하려는 것뿐이다 — 이 컴포넌트는 앱마다 정책이 다를 수 있으니 모른다.
+   */
+  signUpNotice?: string;
+  /** 화면에 들어오자마자 띄울 오류(콜백 실패 등). 사용자가 무엇이든 입력하면 지워진다. */
+  initialError?: string;
 }
 
 export function SignInForm({
@@ -24,9 +33,11 @@ export function SignInForm({
   emailSignInAction,
   emailSignUpAction,
   passwordResetAction,
+  signUpNotice,
+  initialError,
 }: SignInFormProps) {
   const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(initialError ?? null);
   const [notice, setNotice] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>('signin');
   const [email, setEmail] = useState('');
@@ -118,6 +129,9 @@ export function SignInForm({
             disabled={busy}
             required
           />
+          {mode === 'signup' && signUpNotice ? (
+            <div className="auth-note">{signUpNotice}</div>
+          ) : null}
         </div>
 
         {mode !== 'reset' && (

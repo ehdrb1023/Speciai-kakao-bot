@@ -3,6 +3,7 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { createSupabaseServerClient } from '@/lib/auth/server';
+import { isAllowedSignupEmail, SIGNUP_POLICY_NOTICE } from '@/lib/auth/signup-policy';
 
 async function getOrigin() {
   const h = await headers();
@@ -45,6 +46,13 @@ export async function signInWithEmail(email: string, password: string) {
 }
 
 export async function signUpWithEmail(email: string, password: string) {
+  // 사내 전용이라 회사 메일만 받는다. 실제로 막는 것은 Supabase 의 before-user-created 훅이고
+  // (anon 키가 브라우저에 있어 이 검사만으로는 우회된다), 여기서 한 번 더 보는 것은 막힌
+  // 사람이 이유를 한국어로 읽게 하기 위해서다. signup-policy.ts 주석 참고.
+  if (!isAllowedSignupEmail(email)) {
+    return { error: SIGNUP_POLICY_NOTICE };
+  }
+
   const sb = createSupabaseServerClient(await cookies());
   const origin = await getOrigin();
   const { data, error } = await sb.auth.signUp({
