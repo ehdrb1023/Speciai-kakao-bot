@@ -6,7 +6,7 @@
 // 손으로 맞추게 하지 않는 이유: 대괄호 하나 빠진 규칙이 섞이면 그 방은 아무 소리 없이
 // 수집되지 않고, 몇 주 뒤에야 "왜 이 방만 안 들어오지" 로 발견된다.
 
-import { useState, useTransition } from 'react';
+import { useEffect, useRef, useState, useTransition } from 'react';
 import { Ic } from '../IconDefs';
 import { EmptyState } from '../EmptyState';
 import type { PartnerRow, RuleRow, BoundRoomRow } from '@/server/actions/partners';
@@ -52,6 +52,26 @@ const KIND_LABELS: Record<RoomRuleKind, string> = {
   regex: '정규식',
 };
 
+/**
+ * 거래처 목록 폴링 주기.
+ *
+ * 이 화면의 핵심 사건(`#등록`)은 브라우저 밖 — 카톡방 안에서 일어난다. 서버 렌더 결과만
+ * 들고 있으면 명령을 치고 돌아와도 화면이 그대로라, 사람은 새로고침을 해야 붙었는지를 안다.
+ * 안내문이 "방에서 #등록 을 치세요" 라고 시키는 화면이므로 그 결과는 여기서 보여야 한다.
+ */
+const POLL_MS = 10_000;
+// 아무것도 안 바뀌면 주기를 늘린다. 거래처 등록은 하루에 몇 번이라 대부분의 응답이 "변한 것 없음"
+// 이고, 그 빈 응답 하나하나가 서버리스 호출로 과금된다.
+const POLL_MAX_MS = 60_000;
+
+/** 목록이 실제로 달라졌는지 보는 값싼 지문. 같으면 다시 그리지 않는다. */
+function fingerprint(partners: PartnerRow[], unmatched: UnmatchedRoom[]): string {
+  return [
+    ...partners.map((p) => `${p.id}:${p.name}:${p.roomCount}:${p.rooms.map((r) => r.ruleId).join(',')}`),
+    ...unmatched.map((u) => `u${u.id}:${u.hitCount}`),
+  ].join('|');
+}
+
 export function PartnersView({
   partners,
   unmatched,
@@ -67,12 +87,90 @@ export function PartnersView({
   const [pending, start] = useTransition();
   const [newName, setNewName] = useState('');
 
+  // 서버가 준 값이 출발점이고, 폴링이 그 위를 덮는다. 액션(추가·삭제·연결)은 revalidatePath 로
+  // 새 props 를 내려주므로 그때는 props 쪽이 최신이다.
+  const [live, setLive] = useState({ partners, unmatched });
+  useEffect(() => {
+    setLive({ partners, unmatched });
+  }, [partners, unmatched]);
+
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  // 쓰기가 진행 중이면 그 주기는 건너뛴다 — 방금 누른 것이 폴링 결과에 덮여 되돌아가지 않게.
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+
   function run(fn: () => Promise<{ error?: string }>, okMsg: string) {
     start(async () => {
       const res = await fn();
       setMsg(res.error ? `실패: ${res.error}` : okMsg);
     });
   }
+
+  useEffect(() => {
+    let stopped = false;
+    // 연속으로 "변한 것 없음" 이 나온 횟수. 늘어날수록 주기를 두 배씩 늘린다.
+    let idleStreak = 0;
+
+    function nextDelay() {
+      let delay = POLL_MS;
+      for (let i = 0; i < idleStreak && delay < POLL_MAX_MS; i++) delay *= 2;
+      return Math.min(delay, POLL_MAX_MS);
+    }
+
+    async function poll() {
+      if (stopped) return;
+      // 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
+      // 시작하면 "새로고침해야 뜨네" 로 느껴진다.
+      if (document.visibilityState !== 'visible') {
+        idleStreak = 0;
+        return;
+      }
+      if (pendingRef.current) return;
+
+      try {
+        const res = await fetch('/api/kakao/partners', { cache: 'no-store' });
+        if (!res.ok || stopped) return;
+        const json = (await res.json()) as { partners?: PartnerRow[]; unmatched?: UnmatchedRoom[] };
+        if (!json.partners || stopped) return;
+
+        const next = { partners: json.partners, unmatched: json.unmatched ?? [] };
+        const cur = liveRef.current;
+        if (fingerprint(next.partners, next.unmatched) === fingerprint(cur.partners, cur.unmatched)) {
+          // 붙기를 기다리는 중(연결된 방이 없는 거래처가 있거나 미분류 방이 있음)이면 늦추지
+          // 않는다. 사람은 카톡방에서 #등록 을 치고 이 화면을 보고 있고, 그동안 브라우저는
+          // 계속 보이는 상태라 visibilitychange 로 되돌아올 기회가 없다.
+          const waiting =
+            cur.partners.some((p) => p.rooms.length === 0) || cur.unmatched.length > 0;
+          idleStreak = waiting ? 0 : idleStreak + 1;
+          return;
+        }
+        idleStreak = 0;
+        setLive(next);
+      } catch {
+        // 네트워크가 끊긴 것뿐이다. 다음 주기에 다시 시도한다.
+      }
+    }
+
+    function onVisible() {
+      if (document.visibilityState !== 'visible') return;
+      idleStreak = 0;
+      void poll();
+    }
+
+    let timer = window.setTimeout(function tick() {
+      void poll().finally(() => {
+        if (!stopped) timer = window.setTimeout(tick, nextDelay());
+      });
+    }, POLL_MS);
+
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
 
   return (
     <>
@@ -92,11 +190,11 @@ export function PartnersView({
       <HowTo />
 
       {/* 미분류 방 — 아직 어느 거래처에도 안 붙은 방 */}
-      {unmatched.length > 0 ? (
+      {live.unmatched.length > 0 ? (
         <div className="card" style={{ marginBottom: 14 }}>
           <div className="sh" style={{ marginBottom: 10 }}>
             <Ic id="i-flag" w={15} />
-            <b>연결 안 된 방 {unmatched.length}개</b>
+            <b>연결 안 된 방 {live.unmatched.length}개</b>
           </div>
           <div className="fhint" style={{ marginBottom: 10 }}>
             봇이 본 적 있지만 어느 거래처에도 안 붙은 <b>단톡방</b>입니다. 없는 회사명으로
@@ -104,11 +202,11 @@ export function PartnersView({
             본문은 저장하지 않았습니다 — 붙여도 지난 대화는 되살아나지 않고 그 이후부터 쌓입니다.
           </div>
           <div className="list">
-            {unmatched.map((u) => (
+            {live.unmatched.map((u) => (
               <UnmatchedRow
                 key={u.id}
                 room={u}
-                partners={partners}
+                partners={live.partners}
                 canEdit={canEdit}
                 pending={pending}
                 onAdopt={(partnerId) =>
@@ -165,7 +263,7 @@ export function PartnersView({
       ) : null}
 
       {/* 거래처 목록 */}
-      {partners.length === 0 ? (
+      {live.partners.length === 0 ? (
         <div className="card">
           <EmptyState
             icon="i-bldg"
@@ -175,7 +273,7 @@ export function PartnersView({
         </div>
       ) : (
         <div className="list">
-          {partners.map((p) => (
+          {live.partners.map((p) => (
             <PartnerCard
               key={p.id}
               partner={p}
@@ -212,6 +310,9 @@ function HowTo() {
           이때부터 그 방 대화가 이 회사로 모입니다. 끊을 때는 <b>#등록해제</b> 입니다.
         </li>
       </ol>
+      <div className="fhint">
+        <b>#등록</b> 을 치면 이 화면은 몇 초 안에 저절로 갱신됩니다 — 새로고침하지 않아도 됩니다.
+      </div>
       <div className="fhint">
         <b>봇이 설치된 폰의 주인이 직접 치면 안 됩니다</b> — 자기 발화는 알림에 뜨지 않아 봇이
         못 봅니다. 방의 다른 사람이 쳐야 합니다.
@@ -361,7 +462,10 @@ function UnmatchedRow({
   onAdopt: (partnerId: string) => void;
   onDismiss: () => void;
 }) {
-  const [partnerId, setPartnerId] = useState(partners[0]?.id ?? '');
+  const [picked, setPartnerId] = useState('');
+  // 목록이 폴링으로 나중에 채워질 수 있다. 고른 적이 없으면 그때그때 첫 거래처를 기본값으로
+  // 삼는다 — mount 시점 값으로 고정하면 "거래처 없음" 인 채 연결 버튼이 죽어 있는다.
+  const partnerId = picked || partners[0]?.id || '';
 
   return (
     <div className="rowc" style={{ flexWrap: 'wrap', gap: 8 }}>
