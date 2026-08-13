@@ -643,6 +643,15 @@
 
   .console-v2 .toast{position:fixed;left:50%;bottom:30px;transform:translate(-50%,16px);background:var(--ink);color:#fff;font-size:13.5px;font-weight:700;padding:13px 22px;border-radius:14px;box-shadow:var(--sh-lg);opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:99;max-width:92vw;text-align:center}
   .console-v2 .toast.on{opacity:1;transform:translate(-50%,0)}
+  /* 새 카톡 알림 — 누를 수 있는 토스트. 기본 .toast 는 pointer-events:none 이라 여기서 되돌린다.
+     한 줄로 잘라 쓴다. 알림이 길어져 화면을 가리면 업무 화면에서는 방해물이 된다. */
+  .console-v2 button.toast{display:flex;align-items:center;gap:9px;text-align:left;cursor:pointer;
+    pointer-events:auto;max-width:min(92vw,420px);animation:v2toastin .25s ease}
+  .console-v2 button.toast .tx{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+  .console-v2 button.toast .tx b{font-weight:800;margin-right:5px}
+  .console-v2 button.toast svg{flex:none;color:#FEE500}
+  .console-v2 button.toast:hover{filter:brightness(1.15)}
+  @keyframes v2toastin{from{opacity:0;transform:translate(-50%,16px)}to{opacity:1;transform:translate(-50%,0)}}
 
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 

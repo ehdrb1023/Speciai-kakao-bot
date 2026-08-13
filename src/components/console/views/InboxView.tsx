@@ -8,6 +8,7 @@ import { Ic } from '../IconDefs';
 import { EmptyState } from '../EmptyState';
 import { navigateConsole } from '../nav';
 import { useTabActive } from '../tab-active';
+import { useKakaoAlerts } from '../alerts';
 import { seoulClock, seoulDateKey, seoulDayLabel, seoulMonthDayTime } from '@/lib/time';
 
 export interface InboxRoom {
@@ -116,8 +117,13 @@ export function InboxView({ data }: { data: InboxViewData }) {
   const activeMessages = activeId ? messages[activeId] : undefined;
   const activeOutbound = (activeId ? outbound[activeId] : undefined) ?? [];
 
-  // 다른 탭을 보는 동안에는 이 화면이 살아만 있고 네트워크는 쓰지 않는다(tab-active.tsx 참고).
+  // 다른 탭을 보는 동안에는 대화를 다시 받지 않는다. 다만 방 목록만은 60초에 한 번 계속
+  // 받아온다 — 배지와 새 카톡 알림이 "받은 카톡 탭을 보고 있을 때만" 도는 것은 알림이 아니다.
   const tabActive = useTabActive();
+  const alerts = useKakaoAlerts();
+  // 폴링 루프는 한 번만 만들고 최신 값을 ref 로 읽는다(아래 주석 참고). 알림 통로도 같다.
+  const alertsRef = useRef(alerts);
+  alertsRef.current = alerts;
   const tabActiveRef = useRef(tabActive);
   tabActiveRef.current = tabActive;
   /** 폴링 루프 안의 poll 을 밖에서 한 번 부르기 위한 통로. 탭으로 돌아온 순간에 쓴다. */
@@ -145,6 +151,12 @@ export function InboxView({ data }: { data: InboxViewData }) {
   }, [rooms, query, filter]);
 
   const unhandledCount = rooms.filter((r) => !r.handled).length;
+
+  // 상단 탭 배지와 브라우저 탭 제목이 쓰는 숫자. 서버가 준 값이 굳어 있으면 방을 처리완료로
+  // 바꾸거나 새 카톡이 와도 새로고침 전까지 안 변한다.
+  useEffect(() => {
+    alerts.setUnhandled(unhandledCount);
+  }, [unhandledCount, alerts]);
 
   // 방을 고르면 대화를 지연 로드한다. 초기 렌더에는 첫 방만 실려 있다.
   const openRoom = useCallback(
@@ -250,6 +262,8 @@ export function InboxView({ data }: { data: InboxViewData }) {
     let lastFingerprint = '';
 
     function nextDelay() {
+      // 다른 탭을 보는 중이면 배지·알림을 위한 최소한만 — 가장 느린 주기로 목록만 확인한다.
+      if (!tabActiveRef.current) return POLL_MAX_MS;
       let delay = POLL_MS;
       for (let i = 0; i < idleStreak && delay < POLL_MAX_MS; i++) delay *= 2;
       return Math.min(delay, POLL_MAX_MS);
@@ -260,13 +274,39 @@ export function InboxView({ data }: { data: InboxViewData }) {
       return list.map((r) => `${r.id}:${r.lastMessageAt ?? ''}:${r.messageCount}`).join('|');
     }
 
+    /**
+     * 새 카톡이 온 방을 찾아 알린다.
+     *
+     * 지금 열어놓고 보고 있는 방은 알리지 않는다 — 눈앞에 뜬 말풍선을 다시 알려주는 것은
+     * 소음이고, 우리가 대시보드에서 보낸 메시지도 여기로 되돌아오기 때문이다(ack 시점에
+     * 서버가 kakao_messages 에 남긴다). 그건 자기가 방금 친 글이라 알릴 것이 아니다.
+     */
+    function announceNew(before: InboxRoom[], next: InboxRoom[], background: boolean) {
+      if (before.length === 0) return; // 첫 로드 직후엔 전부 "새 것" 이라 알릴 것이 없다
+      const openId = activeIdRef.current;
+      const fresh = next.filter((r) => {
+        if (!background && r.id === openId) return false;
+        const prev = before.find((b) => b.id === r.id);
+        return prev ? r.messageCount > prev.messageCount : r.messageCount > 0;
+      });
+      if (fresh.length === 0) return;
+
+      const head = fresh[0]!;
+      const name = head.partnerName ?? head.roomName;
+      alertsRef.current.notify({
+        title: fresh.length > 1 ? `${name} 외 ${fresh.length - 1}곳` : name,
+        body: head.preview || '새 메시지',
+      });
+    }
+
     async function poll() {
       if (stopped) return;
-      // 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
+      // 창이 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
       // 시작하면 "새로고침해야 뜨네" 로 느껴진다.
-      // 다른 탭(거래처·봇 연동)을 보는 중일 때도 같다. 이 화면은 살아 있지만 아무도 안 본다.
-      if (document.visibilityState !== 'visible' || !tabActiveRef.current) { idleStreak = 0; return; }
+      if (document.visibilityState !== 'visible') { idleStreak = 0; return; }
       if (writesInFlight.current > 0) return;
+      // 다른 탭을 보는 중이면 목록까지만 본다(배지·알림용). 대화 재조회는 아래에서 멈춘다.
+      const background = !tabActiveRef.current;
 
       try {
         const res = await fetch('/api/kakao/rooms', { cache: 'no-store' });
@@ -277,12 +317,15 @@ export function InboxView({ data }: { data: InboxViewData }) {
 
         const before = roomsRef.current;
         setRooms(next);
+        announceNew(before, next, background);
 
         // 발신 대기가 남아 있으면 사람이 "나갔나" 를 기다리는 중이다. 늦추지 않는다.
         const fp = fingerprint(next);
         if (fp !== lastFingerprint || pendingRef.current) idleStreak = 0;
         else idleStreak += 1;
         lastFingerprint = fp;
+
+        if (background) return;
 
         // 열어둔 방에 새 메시지가 있을 때만 대화를 다시 받는다. 매 주기마다 전체 대화를
         // 받으면 방 하나에 300건씩 실려 와 폴링 비용이 목록의 수십 배가 된다.

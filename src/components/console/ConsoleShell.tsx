@@ -3,10 +3,11 @@
 // 거래처 카톡 통합 콘솔 SPA 셸. 상단 헤더 + 가로 네비(탭) 구조.
 // 세션·워크스페이스 가드는 상위 layout(서버)이 처리.
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { IconDefs, Ic } from './IconDefs';
 import { CV2_NAV_EVENT, type Cv2NavDetail } from './nav';
 import { TabActiveProvider } from './tab-active';
+import { KakaoAlertsProvider, type KakaoAlerts } from './alerts';
 
 export type ViewKey = 'kakao' | 'partners' | 'link' | 'settings';
 
@@ -59,6 +60,46 @@ export function ConsoleShell({
   // 폴링은 TabActiveProvider 가 멈춘다.
   const [visited, setVisited] = useState<ViewKey[]>([initialView]);
   const [signingOut, setSigningOut] = useState(false);
+
+  // 미처리 수는 서버가 준 값에서 출발해 받은 카톡 뷰의 폴링이 갱신한다. 예전에는 서버 값이
+  // 그대로 굳어 있어 방을 처리완료로 바꾸거나 새 카톡이 와도 새로고침 전까지 숫자가 안 변했다.
+  const [unhandled, setUnhandled] = useState(badges?.kakao ?? 0);
+  const [toast, setToast] = useState<{ seq: number; title: string; body: string } | null>(null);
+  const toastSeq = useRef(0);
+  const toastTimer = useRef<number | null>(null);
+
+  const alerts = useMemo<KakaoAlerts>(
+    () => ({
+      setUnhandled,
+      notify: ({ title, body }) => {
+        toastSeq.current += 1;
+        setToast({ seq: toastSeq.current, title, body });
+        if (toastTimer.current) clearTimeout(toastTimer.current);
+        // 업무 화면이라 알림이 화면을 계속 가리면 안 된다. 6초 뒤 스스로 사라진다.
+        toastTimer.current = window.setTimeout(() => setToast(null), 6000);
+      },
+    }),
+    [],
+  );
+
+  useEffect(() => () => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
+
+  // 브라우저 탭 제목에도 미처리 수를 적는다. 사무실에서 이 화면은 대개 뒤에 깔려 있어서,
+  // 화면 안에만 표시하면 보러 오기 전까지 아무도 모른다.
+  const baseTitle = useRef('');
+  useEffect(() => {
+    baseTitle.current = document.title;
+    return () => {
+      if (baseTitle.current) document.title = baseTitle.current;
+    };
+  }, []);
+  useEffect(() => {
+    if (!baseTitle.current) return;
+    document.title = unhandled > 0 ? `(${unhandled}) ${baseTitle.current}` : baseTitle.current;
+  }, [unhandled]);
+
   const avatar = userName.charAt(0) || '·';
   const navItems = NAV.filter((n) => !n.adminOnly || isAdmin);
 
@@ -104,7 +145,7 @@ export function ConsoleShell({
 
           <nav className="cv2-nav-inner">
             {navItems.map((n) => {
-              const badge = n.key === 'kakao' ? badges?.kakao : undefined;
+              const badge = n.key === 'kakao' ? unhandled : undefined;
               return (
                 <button
                   key={n.key}
@@ -154,12 +195,32 @@ export function ConsoleShell({
           {navItems.map((n) => (
             <section key={n.key} className={`view${view === n.key ? ' on' : ''}`} id={`v-${n.key}`}>
               {visited.includes(n.key) ? (
-                <TabActiveProvider value={view === n.key}>{slots[n.key]}</TabActiveProvider>
+                <TabActiveProvider value={view === n.key}>
+                  <KakaoAlertsProvider value={alerts}>{slots[n.key]}</KakaoAlertsProvider>
+                </TabActiveProvider>
               ) : null}
             </section>
           ))}
         </div>
       </main>
+
+      {/* 새 카톡 알림. 누르면 받은 카톡으로 간다 — 방금 온 방이 목록 맨 위에 있다. */}
+      {toast ? (
+        <button
+          key={toast.seq}
+          type="button"
+          className="toast on"
+          onClick={() => {
+            setView('kakao');
+            setToast(null);
+          }}
+        >
+          <Ic id="i-bubble" w={15} />
+          <span className="tx">
+            <b>{toast.title}</b> {toast.body}
+          </span>
+        </button>
+      ) : null}
     </div>
   );
 }
