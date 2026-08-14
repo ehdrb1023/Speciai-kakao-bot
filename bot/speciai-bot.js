@@ -1421,39 +1421,78 @@ function bitmapToJpegBase64(bmp) {
   }
 }
 
-/** MessagingStyle 메시지들의 content:// URI 에서 비트맵을 얻는다. 최신 것부터 본다. */
+/**
+ * MessagingStyle 의 **마지막** 메시지에서 비트맵을 얻는다.
+ *
+ * ⚠️ 예전에는 배열을 뒤에서부터 훑어 uri 가 있는 첫 번째 것을 썼다. 그게 버그였다 —
+ * 카톡 알림은 그 방의 **최근 메시지 여러 건**을 함께 싣는다. 그래서 사진 다음에 온 텍스트
+ * 메시지의 알림에도 직전 사진이 그대로 들어 있고, 훑어 내려가다 그 사진을 집어 새 메시지에
+ * 다시 붙였다. 실측(2026-08-14): 14:37 사진과 14:38 텍스트가 같은 첨부를 갖게 됐다.
+ *
+ * 지금 수집하는 것은 **마지막 메시지**다. 그 한 건만 본다. 마지막에 첨부가 없으면 이
+ * 메시지에는 첨부가 없는 것이다 — 앞엣것을 끌어다 쓰지 않는다.
+ */
 function bitmapFromNotiMessages(ex, tried) {
-  var arr = null;
-  try { arr = ex.get('android.messages'); } catch (e) { tried.push('messages=err'); return null; }
-  if (arr === null || arr === undefined) { tried.push('messages=null'); return null; }
+  var bundle = lastNotiMessage(ex, tried);
+  if (bundle === null) return null;
 
   var ctx = appContext();
   if (ctx === null) { tried.push('context=null'); return null; }
 
-  var resolver = ctx.getContentResolver();
-  for (var i = arr.length - 1; i >= 0; i--) {
-    var stream = null;
-    try {
-      var bundle = arr[i];
-      if (!bundle || !bundle.get) continue;
-      var uri = bundle.get('uri');
-      if (uri === null || uri === undefined) continue;
-      var u = (typeof uri === 'string') ? android.net.Uri.parse(uri) : uri;
-      stream = resolver.openInputStream(u);
-      if (stream === null) continue;
-      var bmp = android.graphics.BitmapFactory.decodeStream(stream);
-      if (bmp !== null) {
-        tried.push('messages[' + i + '].uri=ok');
-        return bmp;
-      }
-    } catch (e2) {
-      tried.push('messages[' + i + ']=err');
-    } finally {
-      if (stream !== null) { try { stream.close(); } catch (e3) {} }
+  var stream = null;
+  try {
+    var uri = bundle.get('uri');
+    if (uri === null || uri === undefined) { tried.push('last.uri=없음'); return null; }
+    var u = (typeof uri === 'string') ? android.net.Uri.parse(uri) : uri;
+    stream = ctx.getContentResolver().openInputStream(u);
+    if (stream === null) { tried.push('last.stream=null'); return null; }
+    var bmp = android.graphics.BitmapFactory.decodeStream(stream);
+    if (bmp !== null) {
+      tried.push('last.uri=ok');
+      return bmp;
     }
+    tried.push('last.decode=null');
+  } catch (e2) {
+    tried.push('last=err');
+  } finally {
+    if (stream !== null) { try { stream.close(); } catch (e3) {} }
   }
-  tried.push('messages=uri없음');
   return null;
+}
+
+/**
+ * 이 알림이 실어 온 메시지들 중 **마지막(가장 새 것)** 하나.
+ *
+ * 진단을 여기 모아둔다 — 파일 메시지에 무엇이 실려 오는지 확인할 곳이 여기뿐이다.
+ * 앞엣것에 첨부가 있는데 마지막에 없으면 그 사실도 남긴다(위 버그의 재발 감시).
+ */
+function lastNotiMessage(ex, tried) {
+  var arr = null;
+  try { arr = ex.get('android.messages'); } catch (e) { if (tried) tried.push('messages=err'); return null; }
+  if (arr === null || arr === undefined || arr.length === 0) {
+    if (tried) tried.push('messages=null');
+    return null;
+  }
+  var last = arr[arr.length - 1];
+  if (!last || !last.get) { if (tried) tried.push('last=없음'); return null; }
+
+  if (NOTI_DEBUG) {
+    var older = 0;
+    for (var i = 0; i < arr.length - 1; i++) {
+      try {
+        var b = arr[i];
+        if (b && b.get && b.get('uri') !== null && b.get('uri') !== undefined) older++;
+      } catch (e2) {}
+    }
+    var lt = null, lu = null;
+    try { lt = last.get('type'); } catch (e3) {}
+    try { lu = last.get('uri'); } catch (e4) {}
+    Log.i('kakao-bot[NOTI-ATT] msgs=' + arr.length
+      + ' last.type=' + (lt === null || lt === undefined ? '없음' : String(lt))
+      + ' last.uri=' + (lu === null || lu === undefined ? '없음' : '있음')
+      + ' 앞선첨부=' + older);
+  }
+  return last;
 }
 
 // ── 알림에서 파일(PDF·DOCX 등) 꺼내기 ────────────────────────
@@ -1473,26 +1512,26 @@ function bitmapFromNotiMessages(ex, tried) {
 //    나중에 읽으려 하면 실패한다. 그래서 여기서 바이트까지 다 뽑아 base64 로 들고 간다.
 var FILE_MAX_BASE64 = 3 * 1024 * 1024;
 
-/** 이 알림에 첨부가 실려 있나. 바이트를 읽기 전에 type·이름만 본다(비용 없음). */
+/**
+ * 이 알림의 **마지막 메시지**에 첨부가 실려 있나. 바이트를 읽기 전에 type·이름만 본다.
+ *
+ * 앞선 메시지를 보지 않는 이유는 bitmapFromNotiMessages 주석 참고 — 직전 사진이 다음
+ * 메시지에 다시 붙는 버그의 원인이었다.
+ */
 function notiAttachmentInfo(ex) {
-  var arr = null;
-  try { arr = ex.get('android.messages'); } catch (e) { return null; }
-  if (arr === null || arr === undefined) return null;
-
-  for (var i = arr.length - 1; i >= 0; i--) {
-    try {
-      var bundle = arr[i];
-      if (!bundle || !bundle.get) continue;
-      var uri = bundle.get('uri');
-      if (uri === null || uri === undefined) continue;
-      var mime = bundle.get('type');
-      return {
-        uri: (typeof uri === 'string') ? android.net.Uri.parse(uri) : uri,
-        mime: (mime === null || mime === undefined) ? '' : String(mime)
-      };
-    } catch (e2) {}
+  var last = lastNotiMessage(ex, null);
+  if (last === null) return null;
+  try {
+    var uri = last.get('uri');
+    if (uri === null || uri === undefined) return null;
+    var mime = last.get('type');
+    return {
+      uri: (typeof uri === 'string') ? android.net.Uri.parse(uri) : uri,
+      mime: (mime === null || mime === undefined) ? '' : String(mime)
+    };
+  } catch (e) {
+    return null;
   }
-  return null;
 }
 
 /** content:// 의 원본 파일명. 알림 문구에 이름이 없어도 여기서 나온다. */
@@ -1974,7 +2013,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-14a DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-14b DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
