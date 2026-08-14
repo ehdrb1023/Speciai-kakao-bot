@@ -16,7 +16,7 @@ export default async function Page({ searchParams }: { searchParams: Promise<{ t
   const result = await acceptInvite(token);
 
   return (
-    <div className="auth-shell">
+    <div className="tsa auth-shell">
       <div className="auth-card">
         <div className="auth-brand">
           <div className="auth-logo">율</div>

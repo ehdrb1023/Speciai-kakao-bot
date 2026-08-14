@@ -1,22 +1,37 @@
 'use client';
 
-// 거래처 카톡 통합 콘솔 SPA 셸. 상단 헤더 + 가로 네비(탭) 구조.
+// 거래처 카톡 통합 콘솔 SPA 셸 — 상단 네비(탭) + 탭별 히어로(제목·지표) 구조.
 // 세션·워크스페이스 가드는 상위 layout(서버)이 처리.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { IconDefs, Ic } from './IconDefs';
 import { CV2_NAV_EVENT, type Cv2NavDetail } from './nav';
 import { TabActiveProvider } from './tab-active';
 import { KakaoAlertsProvider, type KakaoAlerts } from './alerts';
 
 export type ViewKey = 'kakao' | 'partners' | 'link' | 'settings';
 
-const NAV: { key: ViewKey; icon: string; label: string; adminOnly?: boolean }[] = [
-  { key: 'kakao', icon: 'i-bubble', label: '받은 카톡' },
-  { key: 'partners', icon: 'i-collect', label: '거래처' },
-  { key: 'link', icon: 'i-pen', label: '봇 연동' },
-  { key: 'settings', icon: 'i-gear', label: '설정', adminOnly: true },
+const NAV: { key: ViewKey; label: string; adminOnly?: boolean }[] = [
+  { key: 'kakao', label: '받은 카톡' },
+  { key: 'partners', label: '거래처' },
+  { key: 'link', label: '연결 진단' },
+  { key: 'settings', label: '설정', adminOnly: true },
 ];
+
+export interface HeroStat {
+  k: string;
+  v: string;
+  unit?: string;
+  alert?: boolean;
+  /** 'unhandled' 면 서버 값 대신 받은 카톡 폴링이 갱신하는 미처리 수를 보여준다. */
+  live?: 'unhandled';
+}
+
+export interface HeroDef {
+  eyebrow: string;
+  title: string;
+  lead: string;
+  stats: HeroStat[];
+}
 
 export interface ConsoleSlots {
   kakao: ReactNode;
@@ -27,23 +42,23 @@ export interface ConsoleSlots {
 
 export function ConsoleShell({
   slots,
+  hero,
   brandName,
   brandMark,
   brandSub,
   userName,
-  userRole,
   badges,
   isAdmin = false,
   initialView = 'kakao',
   signOutAction,
 }: {
   slots: ConsoleSlots;
+  hero: Record<ViewKey, HeroDef>;
   brandName: string;
   brandMark: string;
   brandSub: string;
   userName: string;
-  userRole: string;
-  badges?: { kakao?: number };
+  badges?: { kakao?: number; link?: number };
   isAdmin?: boolean;
   initialView?: ViewKey;
   /** 서버 액션. 세션을 지우고 sign-in 으로 리다이렉트한다 */
@@ -128,48 +143,55 @@ export function ConsoleShell({
     return () => window.removeEventListener(CV2_NAV_EVENT, onNav);
   }, []);
 
-  return (
-    <div className="console-v2">
-      <IconDefs />
+  function badgeOf(key: ViewKey): number {
+    if (key === 'kakao') return unhandled;
+    if (key === 'link') return badges?.link ?? 0;
+    return 0;
+  }
 
-      {/* floating 상단바: 브랜드 · 네비 · 계정 한 줄 */}
-      <header className="cv2-top">
-        <div className="cv2-top-inner">
-          <div className="cv2-brand">
-            <span className="mark">{brandMark}</span>
-            <span className="tx">
-              <b>{brandName}</b>
-              <span>{brandSub}</span>
+  const h = hero[view];
+
+  return (
+    <div className="tss">
+      <header className="nav">
+        <div className="nav-in">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true">
+              {brandMark}
             </span>
+            <span className="brand-name">{brandName}</span>
           </div>
 
-          <nav className="cv2-nav-inner">
+          <nav className="tabs" role="tablist" aria-label="주요 메뉴">
             {navItems.map((n) => {
-              const badge = n.key === 'kakao' ? unhandled : undefined;
+              const badge = badgeOf(n.key);
               return (
                 <button
                   key={n.key}
                   type="button"
-                  className={`cv2-tab${view === n.key ? ' on' : ''}`}
-                  onClick={() => setView(n.key)}
+                  role="tab"
+                  aria-selected={view === n.key}
+                  className="tab"
+                  onClick={() => {
+                    setView(n.key);
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
                 >
-                  <Ic id={n.icon} w={16} />
-                  <span className="lb">{n.label}</span>
-                  {badge ? <span className="bdg">{badge}</span> : null}
+                  {n.label}
+                  {badge > 0 ? <span className="count">{badge}</span> : null}
                 </button>
               );
             })}
           </nav>
 
-          <div className="cv2-user">
-            <span className="tx">
-              <b>{userName}</b>
-              <span>{userRole}</span>
+          <div className="nav-right">
+            <span className="pill">{brandSub}</span>
+            <span className="avatar" title={userName}>
+              {avatar}
             </span>
-            <span className="av">{avatar}</span>
             <button
               type="button"
-              className="cv2-logout"
+              className="iconbtn"
               title="로그아웃"
               aria-label="로그아웃"
               disabled={signingOut}
@@ -183,25 +205,53 @@ export function ConsoleShell({
                 }
               }}
             >
-              <Ic id="i-out" w={16} />
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path
+                  d="M6 2H3.5A1.5 1.5 0 0 0 2 3.5v9A1.5 1.5 0 0 0 3.5 14H6M10.5 11l3-3-3-3M13.5 8H6"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
           </div>
         </div>
       </header>
 
-      {/* 콘텐츠 */}
-      <main className="cv2-main">
-        <div className="inner" style={{ paddingBottom: 48 }}>
-          {navItems.map((n) => (
-            <section key={n.key} className={`view${view === n.key ? ' on' : ''}`} id={`v-${n.key}`}>
-              {visited.includes(n.key) ? (
-                <TabActiveProvider value={view === n.key}>
-                  <KakaoAlertsProvider value={alerts}>{slots[n.key]}</KakaoAlertsProvider>
-                </TabActiveProvider>
-              ) : null}
-            </section>
-          ))}
+      <section className="hero">
+        <div className="hero-in">
+          <div className="hero-top">
+            <div>
+              <span className="eyebrow">{h.eyebrow}</span>
+              <h1>{h.title}</h1>
+              <p className="lead">{h.lead}</p>
+            </div>
+          </div>
+          <div className="stats">
+            {h.stats.map((s) => (
+              <div key={s.k} className={`stat${s.alert ? ' alert' : ''}`}>
+                <div className="k">{s.k}</div>
+                <div className="v">
+                  {s.live === 'unhandled' ? String(unhandled) : s.v}
+                  {s.unit ? <small>{s.unit}</small> : null}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
+      </section>
+
+      <main className="wrap">
+        {navItems.map((n) => (
+          <section key={n.key} className={`view${view === n.key ? ' on' : ''}`} role="tabpanel" id={`v-${n.key}`}>
+            {visited.includes(n.key) ? (
+              <TabActiveProvider value={view === n.key}>
+                <KakaoAlertsProvider value={alerts}>{slots[n.key]}</KakaoAlertsProvider>
+              </TabActiveProvider>
+            ) : null}
+          </section>
+        ))}
       </main>
 
       {/* 새 카톡 알림. 누르면 받은 카톡으로 간다 — 방금 온 방이 목록 맨 위에 있다. */}
@@ -209,13 +259,12 @@ export function ConsoleShell({
         <button
           key={toast.seq}
           type="button"
-          className="toast on"
+          className="toast"
           onClick={() => {
             setView('kakao');
             setToast(null);
           }}
         >
-          <Ic id="i-bubble" w={15} />
           <span className="tx">
             <b>{toast.title}</b> {toast.body}
           </span>

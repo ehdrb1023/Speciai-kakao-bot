@@ -9,7 +9,7 @@ export const metadata = { title: `비밀번호 재설정 · ${BRAND.name}` };
 // 세션 없이 직접 들어오면 미들웨어가 sign-in 으로 돌려보낸다.
 export default function Page() {
   return (
-    <div className="auth-shell">
+    <div className="tsa auth-shell">
       <div className="auth-hero">
         <div className="auth-hero-kicker">{BRAND.name} · {BRAND.tagline}</div>
         <h1>

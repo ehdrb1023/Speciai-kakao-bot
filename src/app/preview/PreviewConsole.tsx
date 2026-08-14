@@ -7,7 +7,7 @@
 // 로컬 no-op 함수를 그대로 넘길 수 있다.
 
 import { useState } from 'react';
-import { ConsoleShell } from '@/components/console/ConsoleShell';
+import { ConsoleShell, type HeroDef, type ViewKey } from '@/components/console/ConsoleShell';
 import { InboxView } from '@/components/console/views/InboxView';
 import { PartnersView } from '@/components/console/views/PartnersView';
 import { LinkView } from '@/components/console/views/LinkView';
@@ -32,6 +32,57 @@ async function noop() {
 
 export function PreviewConsole() {
   const [dismissed, setDismissed] = useState(false);
+
+  const unhandled = PREVIEW_ROOMS.filter((r) => !r.handled).length;
+  const linkedRoomCount = PREVIEW_PARTNERS.reduce((sum, p) => sum + p.rooms.length, 0);
+  const messageCount = PREVIEW_ROOMS.reduce((sum, r) => sum + r.messageCount, 0);
+
+  const hero: Record<ViewKey, HeroDef> = {
+    kakao: {
+      eyebrow: '받은 카톡',
+      title: '들어온 거래처 대화',
+      lead: '등록된 방만 수집합니다. 규칙에 없는 방은 이름과 받은 횟수만 남고 본문은 저장되지 않습니다.',
+      stats: [
+        { k: '미처리 방', v: String(unhandled), unit: '개', alert: true, live: 'unhandled' },
+        { k: '수집된 방', v: String(PREVIEW_ROOMS.length), unit: '개' },
+        { k: '전체 메시지', v: String(messageCount), unit: '건' },
+        { k: '연결 안 된 방', v: String(PREVIEW_UNMATCHED.length), unit: '개' },
+      ],
+    },
+    partners: {
+      eyebrow: '거래처',
+      title: `수집하고 있는 거래처 ${PREVIEW_PARTNERS.length}곳`,
+      lead: '거래처를 먼저 등록해야 카톡방에서 #등록 명령을 쓸 수 있습니다.',
+      stats: [
+        { k: '등록 거래처', v: String(PREVIEW_PARTNERS.length), unit: '곳' },
+        { k: '연결된 방', v: String(linkedRoomCount), unit: '개' },
+        { k: '연결 안 된 방', v: String(PREVIEW_UNMATCHED.length), unit: '개', alert: true },
+        { k: '전체 메시지', v: String(messageCount), unit: '건' },
+      ],
+    },
+    link: {
+      eyebrow: '연결 진단',
+      title: `연결이 비어 있는 방 ${PREVIEW_UNMATCHED.length}개`,
+      lead: '방이 어느 거래처에도 안 붙으면 대화가 쌓이지 않습니다.',
+      stats: [
+        { k: '연결 안 된 방', v: String(PREVIEW_UNMATCHED.length), unit: '개', alert: true },
+        { k: '연결된 방', v: String(linkedRoomCount), unit: '개' },
+        { k: '수집된 방', v: String(PREVIEW_ROOMS.length), unit: '개' },
+        { k: '전체 메시지', v: String(messageCount), unit: '건' },
+      ],
+    },
+    settings: {
+      eyebrow: '설정',
+      title: '워크스페이스 미리보기',
+      lead: '발화자 인식과 발신 이름, 멤버 권한을 여기서 관리합니다.',
+      stats: [
+        { k: '멤버', v: String(PREVIEW_MEMBERS.length), unit: '명' },
+        { k: '초대 대기', v: '0', unit: '명' },
+        { k: '직원 닉네임', v: String(PREVIEW_STAFF_ALIASES.length), unit: '개' },
+        { k: '등록 거래처', v: String(PREVIEW_PARTNERS.length), unit: '곳' },
+      ],
+    },
+  };
 
   return (
     <>
@@ -72,9 +123,9 @@ export function PreviewConsole() {
         brandMark={BRAND.mark}
         brandSub="미리보기"
         userName="신동규"
-        userRole="대표 · 소유자"
-        badges={{ kakao: PREVIEW_ROOMS.filter((r) => !r.handled).length }}
+        badges={{ kakao: unhandled, link: PREVIEW_UNMATCHED.length }}
         isAdmin
+        hero={hero}
         // 미리보기는 세션이 없다. 로그아웃할 것도 없으니 아무것도 하지 않는다.
         signOutAction={async () => {}}
         slots={{
@@ -93,35 +144,36 @@ export function PreviewConsole() {
           partners: (
             <PartnersView
               partners={PREVIEW_PARTNERS}
-              unmatched={PREVIEW_UNMATCHED}
               canEdit
               actions={{
                 createPartner: noop,
                 deletePartner: noop,
                 linkRoom: noop,
                 unlinkRoom: noop,
-                adoptUnmatchedRoom: noop,
-                dismissUnmatchedRoom: noop,
               }}
             />
           ),
           link: (
             <LinkView
+              partners={PREVIEW_PARTNERS}
+              unmatched={PREVIEW_UNMATCHED}
+              canEdit
+              actions={{ adoptUnmatchedRoom: noop, dismissUnmatchedRoom: noop }}
               status={{
                 ingestTokenConfigured: false,
                 workspaceIdConfigured: false,
-              workspaceIdMismatch: false,
-              expectedWorkspaceId: '00000000-0000-0000-0000-000000000000',
+                workspaceIdMismatch: false,
+                expectedWorkspaceId: '00000000-0000-0000-0000-000000000000',
                 appUrl: typeof window === 'undefined' ? '' : window.location.origin,
-                linkedRoomCount: PREVIEW_PARTNERS.reduce((sum, p) => sum + p.rooms.length, 0),
+                linkedRoomCount,
                 roomCount: PREVIEW_ROOMS.length,
-                messageCount: PREVIEW_ROOMS.reduce((sum, r) => sum + r.messageCount, 0),
+                messageCount,
                 lastIngestAt: PREVIEW_ROOMS[0]?.lastMessageAt ?? null,
               }}
             />
           ),
           settings: (
-            <>
+            <div className="stack">
               <StaffAliasesPanel aliases={PREVIEW_STAFF_ALIASES} canEdit saveAction={noop} />
               <MembersPanel
                 workspaceName="미리보기 워크스페이스"
@@ -133,7 +185,7 @@ export function PreviewConsole() {
                 removeMemberAction={noop}
                 cancelInviteAction={noop}
               />
-            </>
+            </div>
           ),
         }}
       />

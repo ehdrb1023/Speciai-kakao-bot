@@ -1,11 +1,9 @@
 'use client';
 
-// 받은 카톡 — 좌(방 목록) · 중(대화) · 우(방 정보) 3분할.
-// 레이아웃·클래스는 advisor 콘솔의 .console / .cs-left / .cs-mid / .cs-right 를 그대로 쓴다.
+// 받은 카톡 — 좌(방 목록) · 중(대화) · 우(방 정보) 3분할. 카톡을 닮은 말풍선 화면.
+// 데이터 배선(폴링·발신 큐·방 상태 토글)은 그대로고, 겉모습만 토스풍 디자인이다.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Ic } from '../IconDefs';
-import { EmptyState } from '../EmptyState';
 import { navigateConsole } from '../nav';
 import { useTabActive } from '../tab-active';
 import { useKakaoAlerts } from '../alerts';
@@ -83,11 +81,19 @@ type Filter = 'all' | 'unhandled' | 'pinned';
  * 남은 2초는 폰 구간이라 주기를 0 으로 해도 사라지지 않는다.
  */
 const POLL_MS = 5_000;
-// 다른 탭(거래처·봇 연동)을 보는 동안의 주기. 이때 받아오는 이유는 화면이 아니라 탭 배지와
+// 다른 탭(거래처·연결 진단)을 보는 동안의 주기. 이때 받아오는 이유는 화면이 아니라 탭 배지와
 // 새 카톡 알림 때문이다. 대화 본문은 받지 않는다.
 const POLL_MAX_MS = 60_000;
 
 const COLORS = ['blue', 'green', 'amber', 'red', 'purple', 'gray'] as const;
+const COLOR_HEX: Record<string, string> = {
+  blue: '#3182f6',
+  green: '#00b894',
+  amber: '#f59e0b',
+  red: '#e5484d',
+  purple: '#8b5cf6',
+  gray: '#8b95a1',
+};
 const COLOR_LABELS: Record<string, string> = {
   blue: '파랑',
   green: '초록',
@@ -155,6 +161,19 @@ export function InboxView({ data }: { data: InboxViewData }) {
     // 고정된 방을 위로. 나머지는 서버가 이미 최근순으로 준다.
     return [...filtered].sort((a, b) => Number(b.pinned) - Number(a.pinned));
   }, [rooms, query, filter]);
+
+  // 목록 구분선: 고정 → 오늘 → 이전. 카톡처럼 훑는 순서를 만들어준다.
+  const groupedRooms = useMemo(() => {
+    const today = seoulDateKey(new Date());
+    const groups: { label: string; rooms: InboxRoom[] }[] = [];
+    for (const room of visibleRooms) {
+      const label = room.pinned ? '고정' : room.lastMessageAt && seoulDateKey(room.lastMessageAt) === today ? '오늘' : '이전';
+      const last = groups[groups.length - 1];
+      if (last && last.label === label) last.rooms.push(room);
+      else groups.push({ label, rooms: [room] });
+    }
+    return groups;
+  }, [visibleRooms]);
 
   const unhandledCount = rooms.filter((r) => !r.handled).length;
 
@@ -417,7 +436,7 @@ export function InboxView({ data }: { data: InboxViewData }) {
       !window.confirm(
         `"${label}" 을 목록에서 내릴까요?\n\n` +
           '모아둔 대화는 지워지지 않습니다. 그 방에 새 메시지가 오면 다시 나타납니다.\n' +
-          '수집 자체를 멈추려면 거래처 탭에서 방 연결을 끊거나 카톡방에서 #등록해제 를 치세요.',
+          '수집 자체를 멈추려면 카톡방에서 #등록해제 를 치거나 거래처 탭에서 연결을 끊으세요.',
       )
     ) {
       return;
@@ -440,221 +459,235 @@ export function InboxView({ data }: { data: InboxViewData }) {
     }
   }
 
+  // 우측 참여자 목록 — 불러온 대화에서 발화자를 모은다(별도 저장 테이블이 없다).
+  const participants = useMemo(() => {
+    const seen = new Map<string, 'us' | 'partner'>();
+    for (const m of activeMessages ?? []) {
+      if (!seen.has(m.speaker)) seen.set(m.speaker, m.side);
+    }
+    return [...seen.entries()].map(([name, side]) => ({ name, side }));
+  }, [activeMessages]);
+
   if (rooms.length === 0) {
     return (
-      <div className="console" style={{ display: 'block', height: 'auto' }}>
-        <div className="card">
-          <EmptyState
-            icon="i-bubble"
-            title="아직 수집된 카톡방이 없어요"
-            desc={
-              data.unmatchedCount > 0
-                ? `봇이 방 ${data.unmatchedCount}개를 봤지만 어느 거래처에도 연결되지 않았어요. 거래처 탭에서 회사명을 등록한 뒤, 그 방에서 #등록 회사명 을 치세요.`
-                : '거래처 탭에서 회사명을 등록하고, 카톡방에서 #등록 회사명 을 한 번 치면 여기에 대화가 쌓입니다.'
-            }
-            action={
-              <button type="button" className="btn pri sm" onClick={() => navigateConsole('partners')}>
-                <Ic id="i-plus" w={14} />
-                거래처 등록하러 가기
-              </button>
-            }
-          />
+      <div className="card">
+        <div className="empty">
+          <b>아직 수집된 카톡방이 없어요</b>
+          <p>
+            {data.unmatchedCount > 0
+              ? `봇이 방 ${data.unmatchedCount}개를 봤지만 어느 거래처에도 연결되지 않았어요. 거래처 탭에서 회사명을 등록한 뒤, 그 방에서 #등록 회사명 을 치세요.`
+              : '거래처 탭에서 회사명을 등록하고, 카톡방에서 #등록 회사명 을 한 번 치면 여기에 대화가 쌓입니다.'}
+          </p>
+          <button type="button" className="btn primary sm" onClick={() => navigateConsole('partners')}>
+            거래처 등록하러 가기
+          </button>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="console">
+    <div className="inbox">
       {/* ── 좌: 방 목록 ── */}
-      <aside className="cs-left">
-        <div className="csearch">
-          <Ic id="i-search" w={14} />
+      <div className="roomcol">
+        <div className="field">
+          <svg width="16" height="16" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <circle cx="6.2" cy="6.2" r="4.2" stroke="#8b95a1" strokeWidth="1.5" />
+            <path d="M9.4 9.4L12 12" stroke="#8b95a1" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
           <input
+            type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="거래처·방 이름 검색"
+            placeholder="방 이름, 거래처 검색"
             aria-label="방 검색"
           />
         </div>
-
-        <div className="filters" style={{ justifyContent: 'flex-start', margin: '0 4px 8px', gap: 6 }}>
-          <button type="button" className={`fchip${filter === 'all' ? ' on' : ''}`} onClick={() => setFilter('all')}>
+        <div className="filters">
+          <button type="button" className="fchip" aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>
             전체 {rooms.length}
           </button>
           <button
             type="button"
-            className={`fchip${filter === 'unhandled' ? ' on' : ''}`}
+            className="fchip"
+            aria-pressed={filter === 'unhandled'}
             onClick={() => setFilter('unhandled')}
           >
             미처리 {unhandledCount}
           </button>
-          <button
-            type="button"
-            className={`fchip${filter === 'pinned' ? ' on' : ''}`}
-            onClick={() => setFilter('pinned')}
-          >
-            고정
+          <button type="button" className="fchip" aria-pressed={filter === 'pinned'} onClick={() => setFilter('pinned')}>
+            고정 {rooms.filter((r) => r.pinned).length}
           </button>
         </div>
 
-        {data.unmatchedCount > 0 ? (
-          <button
-            type="button"
-            className="csmeta"
-            style={{ textAlign: 'left', color: '#C2410C' }}
-            onClick={() => navigateConsole('partners')}
-          >
-            연결 안 된 방 {data.unmatchedCount}개 — 연결하러 가기
-          </button>
-        ) : null}
-
-        {visibleRooms.length === 0 ? (
-          <div className="csmeta">조건에 맞는 방이 없어요.</div>
-        ) : (
-          visibleRooms.map((room) => (
-            // 숨기기 버튼을 안에 두어야 해서 div 다 — button 안에 button 은 넣을 수 없다.
-            <div
-              key={room.id}
-              role="button"
-              tabIndex={0}
-              className={`room${room.id === activeId ? ' on' : ''}`}
-              style={{ cursor: 'pointer' }}
-              onClick={() => void openRoom(room.id)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  void openRoom(room.id);
-                }
-              }}
+        <div className="rooms">
+          {data.unmatchedCount > 0 ? (
+            <button
+              type="button"
+              className="fchip"
+              style={{ margin: '8px 6px 0', height: 'auto', padding: '8px 13px', whiteSpace: 'normal', textAlign: 'left' }}
+              onClick={() => navigateConsole('link')}
             >
-              <span className={`ci${room.color ? ` c-${room.color}` : ''}`}>
-                <Ic id="i-bubble" w={17} />
-              </span>
-              <span className="cm">
-                <span className="nm">
-                  {room.pinned ? <span className="pinmark">고정</span> : null}
-                  {room.partnerName ?? '거래처 연결 안 됨'}
-                  {!room.handled ? <span className="live" /> : null}
-                </span>
-                <span className="rmnm">{room.roomName}</span>
-                <span className="pv">{room.preview || '내용 없음'}</span>
-              </span>
-              <span className="cr2">
-                <span className="rtime">{shortTime(room.lastMessageAt)}</span>
-                {!room.handled ? <span className="drafttag">미처리</span> : null}
-                <button
-                  type="button"
-                  className="roomdel"
-                  aria-label={`${room.roomName} 목록에서 내리기`}
-                  title="목록에서 내리기"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void hideRoom(room.id);
-                  }}
-                >
-                  ×
-                </button>
-              </span>
-            </div>
-          ))
-        )}
-      </aside>
+              연결 안 된 방 {data.unmatchedCount}개 — 진단하러 가기
+            </button>
+          ) : null}
+
+          {visibleRooms.length === 0 ? (
+            <div className="rgroup">조건에 맞는 방이 없어요.</div>
+          ) : (
+            groupedRooms.map((g, gi) => (
+              <div key={`${g.label}-${gi}`}>
+                <div className="rgroup">{g.label}</div>
+                {g.rooms.map((room) => (
+                  // 내리기 버튼을 안에 두어야 해서 div 다 — button 안에 button 은 넣을 수 없다.
+                  <div
+                    key={room.id}
+                    role="button"
+                    tabIndex={0}
+                    className="room"
+                    aria-current={room.id === activeId}
+                    onClick={() => void openRoom(room.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        void openRoom(room.id);
+                      }
+                    }}
+                  >
+                    <span className="r1">
+                      <span
+                        className="cdot"
+                        style={room.color ? { background: COLOR_HEX[room.color] ?? undefined } : undefined}
+                      />
+                      <span className="rname">{room.partnerName ?? room.roomName}</span>
+                      <span className="rtime">{shortTime(room.lastMessageAt)}</span>
+                    </span>
+                    <span className="rlast">{room.preview || '내용 없음'}</span>
+                    <span className="rmeta">
+                      {!room.handled ? <span className="tag point">미처리</span> : <span className="tag green">처리완료</span>}
+                      <span className="tag">{room.partnerName ?? '연결 안 됨'}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="rdel"
+                      aria-label={`${room.roomName} 목록에서 내리기`}
+                      title="목록에서 내리기"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void hideRoom(room.id);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
 
       {/* ── 중: 대화 ── */}
-      <section className="cs-mid">
+      <div className="threadcol">
         {active ? (
           <>
-            <header className="cmh">
+            <div className="thead">
               <div>
-                <b>{active.partnerName ?? '거래처 연결 안 됨'}</b>
-                <div className="sub">
-                  {active.roomName} · 메시지 {active.messageCount}건
+                <div className="tt">{active.partnerName ?? active.roomName}</div>
+                <div className="ts">
+                  {active.roomName} · 메시지 {active.messageCount}건 · 마지막 {shortTime(active.lastMessageAt) || '없음'}
                 </div>
               </div>
-              <div className="rgt">
-                <div className="colorpick">
-                  <button
-                    type="button"
-                    className={`cpbtn${active.color ? ` c-${active.color}` : ''}`}
-                    onClick={() => setColorOpen((v) => !v)}
-                  >
-                    <span className="cpdot" />
-                    {active.color ? COLOR_LABELS[active.color] : '색상'}
-                  </button>
-                  {colorOpen ? (
-                    <div className="cppop">
-                      {COLORS.map((c) => (
-                        <button
-                          key={c}
-                          type="button"
-                          className={`cpopt c-${c}${active.color === c ? ' on' : ''}`}
-                          onClick={() => {
-                            setColorOpen(false);
-                            void patchRoom(active.id, { color: c });
-                          }}
-                        >
-                          <span className="cpdot" />
-                          {COLOR_LABELS[c]}
-                        </button>
-                      ))}
+              <div className="acts">
+                <button
+                  type="button"
+                  className="iconbtn"
+                  aria-label="방 색상"
+                  title="방 색상"
+                  onClick={() => setColorOpen((v) => !v)}
+                >
+                  <span
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: '50%',
+                      background: active.color ? COLOR_HEX[active.color] : 'var(--g300)',
+                      display: 'block',
+                    }}
+                  />
+                </button>
+                {colorOpen ? (
+                  <div className="colorpop">
+                    {COLORS.map((c) => (
                       <button
+                        key={c}
                         type="button"
-                        className="cpopt none"
+                        className={`copt${active.color === c ? ' on' : ''}`}
+                        style={{ background: COLOR_HEX[c] }}
+                        aria-label={COLOR_LABELS[c]}
+                        title={COLOR_LABELS[c]}
                         onClick={() => {
                           setColorOpen(false);
-                          void patchRoom(active.id, { color: null });
+                          void patchRoom(active.id, { color: c });
                         }}
-                      >
-                        색 없음
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
+                      />
+                    ))}
+                    <button
+                      type="button"
+                      className="copt none"
+                      aria-label="색 없음"
+                      title="색 없음"
+                      onClick={() => {
+                        setColorOpen(false);
+                        void patchRoom(active.id, { color: null });
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ) : null}
                 <button
                   type="button"
-                  className={`chipx gy${active.pinned ? ' on' : ''}`}
+                  className="iconbtn"
+                  aria-label={active.pinned ? '고정 해제' : '상단 고정'}
+                  title={active.pinned ? '고정 해제' : '상단 고정'}
                   onClick={() => void patchRoom(active.id, { pinned: !active.pinned })}
                 >
-                  {active.pinned ? '고정 해제' : '상단 고정'}
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M8 1.8l1.7 3.9 4.2.4-3.2 2.8 1 4.1L8 10.9l-3.7 2.1 1-4.1L2.1 6.1l4.2-.4L8 1.8z"
+                      fill={active.pinned ? '#3182f6' : 'none'}
+                      stroke={active.pinned ? '#3182f6' : '#8b95a1'}
+                      strokeWidth="1.4"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
                 </button>
                 <button
                   type="button"
-                  className={`chipx ${active.handled ? 'gr' : 'am'}`}
+                  className={`btn sm${active.handled ? '' : ' primary'}`}
                   onClick={() => void patchRoom(active.id, { handled: !active.handled })}
                 >
-                  <Ic id="i-check" w={11} />
-                  {active.handled ? '처리완료' : '처리완료로 표시'}
+                  {active.handled ? '처리완료됨' : '처리완료로 표시'}
                 </button>
               </div>
-            </header>
+            </div>
 
-            <div className="chat" ref={chatRef}>
-              {loading && !activeMessages ? (
-                <div className="botline">
-                  <span className="spin" />
-                  대화를 불러오는 중…
-                </div>
-              ) : null}
+            <div className="msgs" ref={chatRef}>
+              {loading && !activeMessages ? <div className="sysline">대화를 불러오는 중…</div> : null}
               {renderMessages(activeMessages ?? [], data.staffLabel)}
               {renderOutbound(activeOutbound, (id) => void cancelOutbound(id))}
             </div>
 
-            {sendError ? <div className="sendwarn">{sendError}</div> : null}
+            {sendError ? <div className="note bad" style={{ margin: '10px 24px 0' }}>{sendError}</div> : null}
 
-            <div className="cs-in">
+            <div className="composer">
               {!data.canSend ? (
-                <div className="guard">
-                  <Ic id="i-lock" w={14} />
-                  <span>열람 권한이라 보낼 수 없어요. 답장은 카카오톡에서 직접 보내주세요.</span>
-                </div>
+                <div className="guard">열람 권한이라 보낼 수 없어요. 답장은 카카오톡에서 직접 보내주세요.</div>
               ) : !active.partnerId ? (
-                <div className="guard">
-                  <Ic id="i-lock" w={14} />
-                  <span>거래처에 연결되지 않은 방이에요. 카톡방에서 #등록 을 먼저 해주세요.</span>
-                </div>
+                <div className="guard">거래처에 연결되지 않은 방이에요. 카톡방에서 #등록 을 먼저 해주세요.</div>
               ) : (
-                <div className="composer">
+                <>
                   <textarea
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
@@ -666,100 +699,144 @@ export function InboxView({ data }: { data: InboxViewData }) {
                         void sendDraft();
                       }
                     }}
-                    placeholder={`${active.partnerName ?? active.roomName} 에게 보낼 내용 (Enter 전송 · Shift+Enter 줄바꿈)`}
-                    rows={1}
+                    placeholder={`${active.partnerName ?? active.roomName} 방으로 보낼 메시지를 쓰세요 (Enter 전송 · Shift+Enter 줄바꿈)`}
                     maxLength={2000}
                   />
-                  <button
-                    type="button"
-                    className="sendbtn"
-                    disabled={sending || !draft.trim()}
-                    onClick={() => void sendDraft()}
-                  >
-                    {sending ? '보내는 중…' : '보내기'}
-                  </button>
-                </div>
+                  <div className="crow">
+                    <span className="tiny muted">보내기를 누르면 대기열에 쌓이고, 봇 단말이 순서대로 전송합니다.</span>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={sending || !draft.trim()}
+                      onClick={() => void sendDraft()}
+                    >
+                      {sending ? '보내는 중…' : '보내기'}
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           </>
         ) : (
-          <div className="chat">
-            <div className="botline">왼쪽에서 방을 고르면 대화가 표시됩니다.</div>
+          <div className="msgs">
+            <div className="sysline">왼쪽에서 방을 고르면 대화가 표시됩니다.</div>
           </div>
         )}
-      </section>
+      </div>
 
       {/* ── 우: 방 정보 ── */}
-      <aside className="cs-right">
-        <div className="sc">
-          <div className="sh">
-            <Ic id="i-bldg" w={15} />
-            <b>방 정보</b>
-          </div>
-          {active ? (
-            <div className="plist">
-              <div className="pl-row">
-                <span className="pl-k">거래처</span>
-                <span className={`pl-v${active.partnerName ? '' : ' pl-warn'}`}>
-                  {active.partnerName ?? '연결 안 됨'}
-                </span>
-              </div>
-              <div className="pl-row">
-                <span className="pl-k">방 제목</span>
-                <span className="pl-v">{active.roomName}</span>
-              </div>
-              <div className="pl-row">
-                <span className="pl-k">메시지</span>
-                <span className="pl-v">{active.messageCount}건</span>
-              </div>
-              <div className="pl-row">
-                <span className="pl-k">마지막</span>
-                <span className="pl-v">{fullTime(active.lastMessageAt)}</span>
-              </div>
-              <div className="pl-row">
-                <span className="pl-k">상태</span>
-                <span className={`pl-v${active.handled ? '' : ' pl-warn'}`}>
-                  {active.handled ? '처리완료' : '미처리'}
-                </span>
+      <aside className="panel sidecol" aria-label="방 정보">
+        {active ? (
+          <>
+            <div className="sblock">
+              <div className="sname">{active.partnerName ?? '연결 안 됨'}</div>
+              <div className="ssub">{active.roomName}</div>
+              <div className="mini" style={{ marginTop: 16 }}>
+                <div>
+                  <span>메시지</span>
+                  <b>{active.messageCount}</b>
+                </div>
+                <div>
+                  <span>참여자</span>
+                  <b>{participants.length || '—'}</b>
+                </div>
+                <div>
+                  <span>상태</span>
+                  <b>{active.handled ? '완료' : '미처리'}</b>
+                </div>
               </div>
             </div>
-          ) : (
-            <div className="placeholder">방을 고르면 정보가 표시됩니다.</div>
-          )}
-        </div>
 
-        <div className="sc">
-          <div className="sh">
-            <Ic id="i-clock" w={15} />
-            <b>최근 수신</b>
-            <span className="mini">{rooms.length}방</span>
-          </div>
-          <div className="recentlist">
-            {rooms.slice(0, 20).map((room) => (
-              <button
-                key={room.id}
-                type="button"
-                className={`recentrow${room.id === activeId ? ' on' : ''}`}
-                onClick={() => void openRoom(room.id)}
-              >
-                <span className="rr-top">
-                  <span className="rr-name">{room.partnerName ?? room.roomName}</span>
-                  <span className="rr-time">{shortTime(room.lastMessageAt)}</span>
+            <div className="sblock">
+              <div className="sh">방 정보</div>
+              <div className="kv">
+                <span className="k">거래처</span>
+                <span className={`v${active.partnerName ? '' : ' warn'}`}>{active.partnerName ?? '연결 안 됨'}</span>
+              </div>
+              <div className="kv">
+                <span className="k">방 제목</span>
+                <span className="v" title={active.roomName}>
+                  {active.roomName}
                 </span>
-                <span className="rr-pv">{room.preview || '내용 없음'}</span>
-              </button>
-            ))}
+              </div>
+              <div className="kv">
+                <span className="k">마지막 수신</span>
+                <span className="v">{fullTime(active.lastMessageAt)}</span>
+              </div>
+            </div>
+
+            {activeOutbound.length > 0 ? (
+              <div className="sblock">
+                <div className="sh">보낼 메시지</div>
+                {activeOutbound.map((o) => (
+                  <div key={o.id} className={`qitem${o.status === 'failed' ? ' failed' : ''}`}>
+                    <div className="qt">{o.body}</div>
+                    <div className="qm">
+                      <span>
+                        {o.status === 'failed'
+                          ? `보내지 못함 (${o.attempts}회 시도)`
+                          : o.status === 'sending'
+                            ? '보내는 중…'
+                            : '대기 중'}
+                      </span>
+                      <button type="button" className="btn sm" onClick={() => void cancelOutbound(o.id)}>
+                        {o.status === 'failed' ? '지우기' : '취소'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {participants.length > 0 ? (
+              <div className="sblock">
+                <div className="sh">참여자 {participants.length}명</div>
+                {participants.map((p) => (
+                  <div key={p.name} className="prow">
+                    <span className="pf2">{p.name.charAt(0)}</span>
+                    <span className="pn2">{p.name}</span>
+                    <span className={`tag${p.side === 'us' ? ' point' : ''}`}>
+                      {p.side === 'us' ? data.staffLabel : active.partnerName ?? '거래처'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="sblock">
+              <div className="sh">이 방 관리</div>
+              <div className="sacts">
+                <button
+                  type="button"
+                  className={`btn${active.handled ? '' : ' primary'}`}
+                  onClick={() => void patchRoom(active.id, { handled: !active.handled })}
+                >
+                  {active.handled ? '미처리로 되돌리기' : '처리완료로 표시'}
+                </button>
+                <button type="button" className="btn" onClick={() => void patchRoom(active.id, { pinned: !active.pinned })}>
+                  {active.pinned ? '고정 해제' : '상단 고정'}
+                </button>
+                <button type="button" className="btn danger" onClick={() => void hideRoom(active.id)}>
+                  목록에서 내리기
+                </button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="sblock">
+            <div className="sh">방 정보</div>
+            <div className="muted tiny">방을 고르면 정보가 표시됩니다.</div>
           </div>
-        </div>
+        )}
       </aside>
     </div>
   );
 }
 
-/** 날짜가 바뀌는 지점에 구분선을 넣고, 같은 사람의 연속 발화는 묶는다(카톡과 같은 읽기 리듬). */
+/** 날짜가 바뀌는 지점에 구분선을 넣고, 같은 사람의 연속 발화는 말풍선만 이어 붙인다(카톡과 같은 읽기 리듬). */
 function renderMessages(messages: InboxMessage[], staffLabel: string) {
   if (messages.length === 0) {
-    return <div className="botline">아직 이 방에 저장된 대화가 없어요.</div>;
+    return <div className="sysline">아직 이 방에 저장된 대화가 없어요.</div>;
   }
 
   const out: React.ReactNode[] = [];
@@ -767,11 +844,11 @@ function renderMessages(messages: InboxMessage[], staffLabel: string) {
   let lastSpeaker = '';
 
   for (const m of messages) {
-    const day = dayKey(m.sentAt);
+    const day = seoulDateKey(m.sentAt);
     if (day !== lastDay) {
       out.push(
-        <div key={`d-${m.id}`} className="daydiv">
-          {dayLabel(m.sentAt)}
+        <div key={`d-${m.id}`} className="daysep">
+          {seoulDayLabel(m.sentAt)}
         </div>,
       );
       lastDay = day;
@@ -780,24 +857,29 @@ function renderMessages(messages: InboxMessage[], staffLabel: string) {
 
     const grouped = m.speaker === lastSpeaker;
     lastSpeaker = m.speaker;
+    const us = m.side === 'us';
 
     out.push(
-      <div key={m.id} className={`msg${m.side === 'us' ? ' out' : ''}${grouped ? ' grouped' : ''}`}>
-        <span className={`mav${grouped ? ' ghost' : ''}`}>{grouped ? '' : m.speaker.charAt(0)}</span>
-        <div className="mbody">
-          <div className={`who${grouped ? ' tiny' : ''}`}>
-            {grouped ? '' : m.side === 'us' ? `${m.speaker} · ${staffLabel}` : m.speaker}
-            <span className="tm">{clockTime(m.sentAt)}</span>
-          </div>
-          <div className="bubble">
-            {m.attachment?.url ? (
-              <img
-                src={m.attachment.url}
-                alt={m.attachment.name}
-                style={{ maxWidth: '100%', borderRadius: 10, marginBottom: m.body ? 6 : 0 }}
-              />
-            ) : null}
-            {m.body}
+      <div key={m.id} className={`msg${us ? ' us' : ''}`}>
+        {!us ? <span className={`pf${grouped ? ' ghost' : ''}`}>{grouped ? '' : m.speaker.charAt(0)}</span> : null}
+        <div className="col">
+          {!grouped ? (
+            <div className="who" style={us ? { textAlign: 'right' } : undefined}>
+              {us ? `${m.speaker} · ${staffLabel}` : m.speaker}
+            </div>
+          ) : null}
+          <div className="line">
+            <div className="bub">
+              {m.attachment?.url ? (
+                <>
+                  <img src={m.attachment.url} alt={m.attachment.name} />
+                  {m.body ? <span>{m.body}</span> : null}
+                </>
+              ) : (
+                m.body
+              )}
+            </div>
+            <span className="at">{seoulClock(m.sentAt)}</span>
           </div>
         </div>
       </div>,
@@ -819,23 +901,16 @@ function renderOutbound(rows: InboxOutbound[], onCancel: (id: string) => void) {
   return rows.map((o) => {
     const failed = o.status === 'failed';
     return (
-      <div key={o.id} className={`msg out pendingmsg${failed ? ' failedmsg' : ''}`}>
-        <span className="mav ghost" />
-        <div className="mbody">
-          <div className="who tiny">
-            <span className="tm">
-              {failed
-                ? `보내지 못했어요 (${o.attempts}회 시도)`
-                : o.status === 'sending'
-                  ? '보내는 중…'
-                  : '전송 대기'}
+      <div key={o.id} className={`msg us ${failed ? 'failedmsg' : 'pending'}`}>
+        <div className="col">
+          <div className="line">
+            <div className="bub">{o.body}</div>
+            <span className="at">
+              {failed ? `보내지 못함 (${o.attempts}회)` : o.status === 'sending' ? '보내는 중…' : '전송 대기'}
+              <button type="button" className="cancel" onClick={() => onCancel(o.id)}>
+                {failed ? '지우기' : '취소'}
+              </button>
             </span>
-          </div>
-          <div className="bubble">{o.body}</div>
-          <div className="obact">
-            <button type="button" className="obcancel" onClick={() => onCancel(o.id)}>
-              {failed ? '지우기' : '취소'}
-            </button>
           </div>
         </div>
       </div>
@@ -843,20 +918,8 @@ function renderOutbound(rows: InboxOutbound[], onCancel: (id: string) => void) {
   });
 }
 
-// 아래 넷은 전부 서울 고정 포맷터를 쓴다. 로컬 타임존으로 렌더하면 서버(UTC)와 어긋나
+// 시각 표기는 전부 서울 고정 포맷터를 쓴다. 로컬 타임존으로 렌더하면 서버(UTC)와 어긋나
 // 하이드레이션이 깨진다 — src/lib/time.ts 주석 참고.
-
-function dayKey(iso: string): string {
-  return seoulDateKey(iso);
-}
-
-function dayLabel(iso: string): string {
-  return seoulDayLabel(iso);
-}
-
-function clockTime(iso: string): string {
-  return seoulClock(iso);
-}
 
 function fullTime(iso: string | null): string {
   if (!iso) return '기록 없음';

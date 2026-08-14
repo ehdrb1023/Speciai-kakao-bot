@@ -5,14 +5,13 @@
 // 방↔거래처 연결은 카톡방 안에서 "#등록 <회사명>" 으로 만든다. 이 화면에서 방 이름 패턴을
 // 손으로 맞추게 하지 않는 이유: 대괄호 하나 빠진 규칙이 섞이면 그 방은 아무 소리 없이
 // 수집되지 않고, 몇 주 뒤에야 "왜 이 방만 안 들어오지" 로 발견된다.
+//
+// 미분류(연결 안 된) 방 목록은 연결 진단 탭(LinkView)에 있다.
 
 import { useEffect, useRef, useState, useTransition } from 'react';
-import { Ic } from '../IconDefs';
-import { EmptyState } from '../EmptyState';
 import { useTabActive } from '../tab-active';
 import type { PartnerRow, RuleRow, BoundRoomRow } from '@/server/actions/partners';
 import type { RoomRuleKind } from '@/server/kakao/rules';
-import { seoulMonthDayTime } from '@/lib/time';
 import { isGeneratedRoomName } from '@/server/kakao/rules';
 
 /**
@@ -27,23 +26,11 @@ function roomLabel(roomName: string, partnerName?: string): string {
   return partnerName ? `${partnerName} 카톡방` : '카톡방';
 }
 
-export interface UnmatchedRoom {
-  id: string;
-  roomName: string;
-  hitCount: number;
-  lastSeenAt: string;
-}
-
 export interface PartnersActions {
   createPartner: (input: { name: string }) => Promise<{ error?: string }>;
   deletePartner: (id: string) => Promise<{ error?: string }>;
   linkRoom: (input: { partnerId: string; roomName: string }) => Promise<{ error?: string }>;
   unlinkRoom: (ruleId: string) => Promise<{ error?: string }>;
-  adoptUnmatchedRoom: (input: {
-    unmatchedId: string;
-    partnerId: string;
-  }) => Promise<{ error?: string }>;
-  dismissUnmatchedRoom: (id: string) => Promise<{ error?: string }>;
 }
 
 const KIND_LABELS: Record<RoomRuleKind, string> = {
@@ -65,8 +52,13 @@ const POLL_MS = 10_000;
 // 이고, 그 빈 응답 하나하나가 서버리스 호출로 과금된다.
 const POLL_MAX_MS = 60_000;
 
+export interface UnmatchedLite {
+  id: string;
+  hitCount: number;
+}
+
 /** 목록이 실제로 달라졌는지 보는 값싼 지문. 같으면 다시 그리지 않는다. */
-function fingerprint(partners: PartnerRow[], unmatched: UnmatchedRoom[]): string {
+function fingerprint(partners: PartnerRow[], unmatched: UnmatchedLite[]): string {
   return [
     ...partners.map((p) => `${p.id}:${p.name}:${p.roomCount}:${p.rooms.map((r) => r.ruleId).join(',')}`),
     ...unmatched.map((u) => `u${u.id}:${u.hitCount}`),
@@ -75,12 +67,10 @@ function fingerprint(partners: PartnerRow[], unmatched: UnmatchedRoom[]): string
 
 export function PartnersView({
   partners,
-  unmatched,
   canEdit,
   actions,
 }: {
   partners: PartnerRow[];
-  unmatched: UnmatchedRoom[];
   canEdit: boolean;
   actions: PartnersActions;
 }) {
@@ -90,10 +80,10 @@ export function PartnersView({
 
   // 서버가 준 값이 출발점이고, 폴링이 그 위를 덮는다. 액션(추가·삭제·연결)은 revalidatePath 로
   // 새 props 를 내려주므로 그때는 props 쪽이 최신이다.
-  const [live, setLive] = useState({ partners, unmatched });
+  const [live, setLive] = useState(partners);
   useEffect(() => {
-    setLive({ partners, unmatched });
-  }, [partners, unmatched]);
+    setLive(partners);
+  }, [partners]);
 
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -128,7 +118,7 @@ export function PartnersView({
       if (stopped) return;
       // 안 보이는 동안은 부르지 않는다. 다만 주기는 되돌려둔다 — 돌아왔을 때 느린 채로
       // 시작하면 "새로고침해야 뜨네" 로 느껴진다.
-      // 다른 탭(받은 카톡·봇 연동)을 보는 중일 때도 같다. 이 화면은 살아 있지만 아무도 안 본다.
+      // 다른 탭(받은 카톡·연결 진단)을 보는 중일 때도 같다. 이 화면은 살아 있지만 아무도 안 본다.
       if (document.visibilityState !== 'visible' || !tabActiveRef.current) {
         idleStreak = 0;
         return;
@@ -138,17 +128,16 @@ export function PartnersView({
       try {
         const res = await fetch('/api/kakao/partners', { cache: 'no-store' });
         if (!res.ok || stopped) return;
-        const json = (await res.json()) as { partners?: PartnerRow[]; unmatched?: UnmatchedRoom[] };
+        const json = (await res.json()) as { partners?: PartnerRow[]; unmatched?: UnmatchedLite[] };
         if (!json.partners || stopped) return;
 
-        const next = { partners: json.partners, unmatched: json.unmatched ?? [] };
+        const next = json.partners;
         const cur = liveRef.current;
-        if (fingerprint(next.partners, next.unmatched) === fingerprint(cur.partners, cur.unmatched)) {
-          // 붙기를 기다리는 중(연결된 방이 없는 거래처가 있거나 미분류 방이 있음)이면 늦추지
-          // 않는다. 사람은 카톡방에서 #등록 을 치고 이 화면을 보고 있고, 그동안 브라우저는
-          // 계속 보이는 상태라 visibilitychange 로 되돌아올 기회가 없다.
-          const waiting =
-            cur.partners.some((p) => p.rooms.length === 0) || cur.unmatched.length > 0;
+        if (fingerprint(next, []) === fingerprint(cur, [])) {
+          // 붙기를 기다리는 중(연결된 방이 없는 거래처가 있음)이면 늦추지 않는다. 사람은
+          // 카톡방에서 #등록 을 치고 이 화면을 보고 있고, 그동안 브라우저는 계속 보이는
+          // 상태라 visibilitychange 로 되돌아올 기회가 없다.
+          const waiting = cur.some((p) => p.rooms.length === 0);
           idleStreak = waiting ? 0 : idleStreak + 1;
           return;
         }
@@ -198,107 +187,74 @@ export function PartnersView({
   }, [tabActive]);
 
   return (
-    <>
-      <div className="vhead">
-        <h1>거래처</h1>
-        <div className="sub">
-          여기에 회사명을 등록하고, 카톡방에서 <b>#등록 회사명</b> 을 한 번 치면 그 방부터 수집됩니다.
-        </div>
-      </div>
+    <div className="stack">
+      {msg ? <div className="note">{msg}</div> : null}
 
-      {msg ? (
-        <div className="noterow" style={{ marginBottom: 12 }}>
-          {msg}
-        </div>
-      ) : null}
-
-      <HowTo />
-
-      {/* 미분류 방 — 아직 어느 거래처에도 안 붙은 방 */}
-      {live.unmatched.length > 0 ? (
-        <div className="card" style={{ marginBottom: 14 }}>
-          <div className="sh" style={{ marginBottom: 10 }}>
-            <Ic id="i-flag" w={15} />
-            <b>연결 안 된 방 {live.unmatched.length}개</b>
-          </div>
-          <div className="fhint" style={{ marginBottom: 10 }}>
-            봇이 본 적 있지만 어느 거래처에도 안 붙은 <b>단톡방</b>입니다. 없는 회사명으로
-            <b>#등록</b> 을 친 방도 여기 나옵니다(오타 확인용). 개인 1:1 카톡은 올라오지 않습니다.
-            본문은 저장하지 않았습니다 — 붙여도 지난 대화는 되살아나지 않고 그 이후부터 쌓입니다.
-          </div>
-          <div className="list">
-            {live.unmatched.map((u) => (
-              <UnmatchedRow
-                key={u.id}
-                room={u}
-                partners={live.partners}
-                canEdit={canEdit}
-                pending={pending}
-                onAdopt={(partnerId) =>
-                  run(
-                    () => actions.adoptUnmatchedRoom({ unmatchedId: u.id, partnerId }),
-                    '연결했어요. 다음 메시지부터 이 거래처로 모입니다.',
-                  )
-                }
-                onDismiss={() => run(() => actions.dismissUnmatchedRoom(u.id), '목록에서 내렸어요.')}
-              />
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {/* 거래처 추가 — 회사명만 */}
+      {/* 거래처 추가 + 연결하는 법 */}
       {canEdit ? (
-        <div className="card" style={{ marginBottom: 14 }}>
-          <div className="sh" style={{ marginBottom: 10 }}>
-            <Ic id="i-plus" w={15} />
-            <b>거래처 추가</b>
+        <div className="card">
+          <div className="card-h">
+            <div>
+              <h2>거래처 추가</h2>
+              <div className="desc">회사명만 등록합니다. 방 연결은 그 카톡방에서 #등록 회사명 으로 만듭니다.</div>
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-            <div className="fld" style={{ flex: '1 1 240px', marginBottom: 0 }}>
-              <label htmlFor="p-name">회사명</label>
+          <div className="card-b">
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <input
-                id="p-name"
-                className="tin"
+                className="input"
+                style={{ flex: '1 1 240px' }}
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
-                placeholder="삼성전자"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing && newName.trim()) {
+                    run(async () => {
+                      const res = await actions.createPartner({ name: newName });
+                      if (!res.error) setNewName('');
+                      return res;
+                    }, '거래처를 추가했어요. 이제 그 카톡방에서 #등록 으로 붙이세요.');
+                  }
+                }}
+                placeholder="회사명 (예: 삼성전자)"
+                aria-label="회사명"
               />
+              <button
+                type="button"
+                className="btn primary"
+                disabled={pending || !newName.trim()}
+                onClick={() =>
+                  run(async () => {
+                    const res = await actions.createPartner({ name: newName });
+                    if (!res.error) setNewName('');
+                    return res;
+                  }, '거래처를 추가했어요. 이제 그 카톡방에서 #등록 으로 붙이세요.')
+                }
+              >
+                추가
+              </button>
             </div>
-            <button
-              type="button"
-              className="btn pri"
-              disabled={pending || !newName.trim()}
-              onClick={() =>
-                run(async () => {
-                  const res = await actions.createPartner({ name: newName });
-                  if (!res.error) setNewName('');
-                  return res;
-                }, '거래처를 추가했어요. 이제 그 카톡방에서 #등록 으로 붙이세요.')
-              }
-            >
-              추가
-            </button>
-          </div>
-          <div className="fhint">
-            방 안에서 <b>#등록</b> 으로 붙일 때는 여기 적은 이름 그대로 쳐야 합니다.{' '}
-            <b>삼성전자</b> 로 등록했으면 <b>#등록 삼성전자</b> 입니다.
+            <div className="note" style={{ marginBottom: 0 }}>
+              ① 여기에 회사명 등록 → ② 그 카톡방에서 <b>#등록 회사명</b> (등록한 이름 그대로) → ③ 그때부터 수집.
+              끊을 때는 <b>#등록해제</b>. 명령 결과는 몇 초 안에 이 화면에 저절로 반영됩니다.
+              <br />
+              봇이 설치된 폰의 주인이 직접 치면 안 됩니다 — 자기 발화는 알림에 뜨지 않아 봇이 못 봅니다.
+              방의 다른 사람이 쳐야 합니다.
+            </div>
           </div>
         </div>
       ) : null}
 
-      {/* 거래처 목록 */}
-      {live.partners.length === 0 ? (
+      {/* 거래처 카드 */}
+      {live.length === 0 ? (
         <div className="card">
-          <EmptyState
-            icon="i-bldg"
-            title="등록된 거래처가 없어요"
-            desc="회사명을 먼저 추가하세요. 그 다음 카톡방에서 #등록 회사명 을 치면 그 방부터 수집됩니다."
-          />
+          <div className="empty">
+            <b>등록된 거래처가 없어요</b>
+            <p>회사명을 먼저 추가하세요. 그 다음 카톡방에서 #등록 회사명 을 치면 그 방부터 수집됩니다.</p>
+          </div>
         </div>
       ) : (
-        <div className="list">
-          {live.partners.map((p) => (
+        <div className="grid3">
+          {live.map((p) => (
             <PartnerCard
               key={p.id}
               partner={p}
@@ -312,40 +268,6 @@ export function PartnersView({
           ))}
         </div>
       )}
-    </>
-  );
-}
-
-/** 처음 쓰는 사람이 순서를 틀리지 않게 하는 3단계 안내. */
-function HowTo() {
-  return (
-    <div className="card" style={{ marginBottom: 14 }}>
-      <div className="sh" style={{ marginBottom: 10 }}>
-        <Ic id="i-check" w={15} />
-        <b>연결하는 법</b>
-      </div>
-      <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.9 }}>
-        <li>
-          아래에서 <b>회사명</b>을 등록합니다.
-        </li>
-        <li>
-          그 카톡방에서 <b>#등록 회사명</b> 을 한 번 칩니다. 여기 등록한 이름 그대로 쳐야 합니다.
-        </li>
-        <li>
-          이때부터 그 방 대화가 이 회사로 모입니다. 끊을 때는 <b>#등록해제</b> 입니다.
-        </li>
-      </ol>
-      <div className="fhint">
-        <b>#등록</b> 을 치면 이 화면은 몇 초 안에 저절로 갱신됩니다 — 새로고침하지 않아도 됩니다.
-      </div>
-      <div className="fhint">
-        <b>봇이 설치된 폰의 주인이 직접 치면 안 됩니다</b> — 자기 발화는 알림에 뜨지 않아 봇이
-        못 봅니다. 방의 다른 사람이 쳐야 합니다.
-        <br />
-        이 단말의 카톡 알림에는 방 제목이 실려오지 않아서, 봇은 알림 자체의 식별자로 방을
-        구분합니다. 그래서 <b>#등록</b> 이 방을 지목하는 유일한 방법이고, 화면에 보이는 이름은
-        그때 친 회사명입니다.
-      </div>
     </div>
   );
 }
@@ -364,43 +286,33 @@ function PartnerCard({
   onDelete: () => void;
 }) {
   return (
-    <div className="card" style={{ padding: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <span className="cav">{partner.name.charAt(0)}</span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <b style={{ fontSize: 14, fontWeight: 800 }}>{partner.name}</b>
-          <div className="pl-v" style={{ fontSize: 11.5, color: 'var(--mut)' }}>
-            연결된 방 {partner.rooms.length}개 · 수집 중인 방 {partner.roomCount}개
-          </div>
-        </div>
-        {canEdit ? (
-          <button
-            type="button"
-            className="chipx rd"
-            disabled={pending}
-            onClick={() => {
-              if (
-                window.confirm(
-                  `"${partner.name}" 거래처를 지울까요? 방 연결도 함께 끊깁니다. 모아둔 대화는 남습니다.`,
-                )
-              ) {
-                onDelete();
-              }
-            }}
-          >
-            삭제
-          </button>
-        ) : null}
-      </div>
+    <div className="pcard">
+      <div className="pn">{partner.name}</div>
+      {canEdit ? (
+        <button
+          type="button"
+          className="btn sm quiet pdel"
+          disabled={pending}
+          onClick={() => {
+            if (
+              window.confirm(
+                `"${partner.name}" 거래처를 지울까요? 방 연결도 함께 끊깁니다. 모아둔 대화는 남습니다.`,
+              )
+            ) {
+              onDelete();
+            }
+          }}
+        >
+          삭제
+        </button>
+      ) : null}
 
-      {partner.rooms.length === 0 ? (
-        <div className="fhint" style={{ color: '#C2410C' }}>
-          연결된 방이 없습니다. 카톡방에서 <b>#등록 {partner.name}</b> 을 치세요.
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-          {partner.rooms.map((r: BoundRoomRow) => (
-            <span key={r.ruleId} className="chipx wt" title={r.roomName}>
+      <div className="rooms-in">
+        {partner.rooms.length === 0 ? (
+          <span className="tag amber">연결된 방 없음 — 카톡방에서 #등록 {partner.name}</span>
+        ) : (
+          partner.rooms.map((r: BoundRoomRow) => (
+            <span key={r.ruleId} className="tag" title={r.roomName}>
               {roomLabel(r.roomName, partner.name)}
               {canEdit ? (
                 <button
@@ -408,23 +320,38 @@ function PartnerCard({
                   aria-label={`${roomLabel(r.roomName, partner.name)} 연결 해제`}
                   disabled={pending}
                   onClick={() => {
-                    if (window.confirm(`"${roomLabel(r.roomName, partner.name)}" 의 수집을 멈출까요? 모아둔 대화는 남습니다.`)) {
+                    if (
+                      window.confirm(
+                        `"${roomLabel(r.roomName, partner.name)}" 의 수집을 멈출까요? 모아둔 대화는 남습니다.`,
+                      )
+                    ) {
                       onUnlink(r.ruleId);
                     }
                   }}
-                  style={{ marginLeft: 4, color: 'var(--fnt)', fontWeight: 800 }}
                 >
                   ×
                 </button>
               ) : null}
             </span>
-          ))}
-        </div>
-      )}
+          ))
+        )}
+      </div>
 
       {partner.legacyRules.length > 0 ? (
         <LegacyRules rules={partner.legacyRules} canEdit={canEdit} pending={pending} onUnlink={onUnlink} />
       ) : null}
+
+      <div className="pr">
+        <div>
+          연결된 방<b>{partner.rooms.length}개</b>
+        </div>
+        <div>
+          수집 중<b>{partner.roomCount}개</b>
+        </div>
+        <div>
+          예전 규칙<b>{partner.legacyRules.length}건</b>
+        </div>
+      </div>
     </div>
   );
 }
@@ -445,93 +372,22 @@ function LegacyRules({
   onUnlink: (ruleId: string) => void;
 }) {
   return (
-    <div style={{ marginTop: 12 }}>
-      <div className="fhint" style={{ marginBottom: 6 }}>
-        예전 패턴 규칙 {rules.length}개 — 이 패턴에 걸리는 방은 <b>#등록</b> 없이도 수집됩니다. 지금
-        방식으로 정리하려면 지우고 방에서 <b>#등록</b> 을 치세요.
+    <div style={{ marginTop: 10 }}>
+      <div className="tiny muted" style={{ marginBottom: 6 }}>
+        예전 패턴 규칙 — 이 패턴에 걸리는 방은 #등록 없이도 수집됩니다.
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {rules.map((r) => (
-          <span key={r.id} className="chipx gy">
+          <span key={r.id} className="tag">
             {KIND_LABELS[r.kind]} · {r.pattern}
             {canEdit ? (
-              <button
-                type="button"
-                aria-label="예전 규칙 삭제"
-                disabled={pending}
-                onClick={() => onUnlink(r.id)}
-                style={{ marginLeft: 4, color: 'var(--fnt)', fontWeight: 800 }}
-              >
+              <button type="button" aria-label="예전 규칙 삭제" disabled={pending} onClick={() => onUnlink(r.id)}>
                 ×
               </button>
             ) : null}
           </span>
         ))}
       </div>
-    </div>
-  );
-}
-
-function UnmatchedRow({
-  room,
-  partners,
-  canEdit,
-  pending,
-  onAdopt,
-  onDismiss,
-}: {
-  room: UnmatchedRoom;
-  partners: PartnerRow[];
-  canEdit: boolean;
-  pending: boolean;
-  onAdopt: (partnerId: string) => void;
-  onDismiss: () => void;
-}) {
-  const [picked, setPartnerId] = useState('');
-  // 목록이 폴링으로 나중에 채워질 수 있다. 고른 적이 없으면 그때그때 첫 거래처를 기본값으로
-  // 삼는다 — mount 시점 값으로 고정하면 "거래처 없음" 인 채 연결 버튼이 죽어 있는다.
-  const partnerId = picked || partners[0]?.id || '';
-
-  return (
-    <div className="rowc" style={{ flexWrap: 'wrap', gap: 8 }}>
-      <span className="cav">
-        <Ic id="i-bubble" w={16} />
-      </span>
-      <span className="cm">
-        <b>{room.roomName}</b>
-        <span className="mt">
-          {room.hitCount}회 수신 · 마지막 {seoulMonthDayTime(room.lastSeenAt)}
-        </span>
-      </span>
-      {canEdit ? (
-        <>
-          <select
-            className="tin"
-            style={{ flex: '0 0 160px' }}
-            value={partnerId}
-            onChange={(e) => setPartnerId(e.target.value)}
-            aria-label="거래처 선택"
-          >
-            {partners.length === 0 ? <option value="">거래처 없음</option> : null}
-            {partners.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="btn pri sm"
-            disabled={pending || !partnerId}
-            onClick={() => onAdopt(partnerId)}
-          >
-            연결
-          </button>
-        </>
-      ) : null}
-      <button type="button" className="chipx gy" disabled={pending} onClick={onDismiss}>
-        무시
-      </button>
     </div>
   );
 }

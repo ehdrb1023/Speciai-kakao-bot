@@ -37,7 +37,7 @@ export default async function Page() {
   }
 
   return (
-    <div className="auth-shell">
+    <div className="tsa auth-shell">
       <OnboardingClient
         createAction={createWorkspace}
         userEmail={session.email}

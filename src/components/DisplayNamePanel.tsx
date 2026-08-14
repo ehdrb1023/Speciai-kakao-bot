@@ -4,7 +4,6 @@
 // 거래처가 보는 이름이라 아이디(martin1023)가 그대로 나가면 곤란하다.
 
 import { useState, useTransition } from 'react';
-import { Ic } from './console/IconDefs';
 
 export function DisplayNamePanel({
   current,
@@ -34,42 +33,43 @@ export function DisplayNamePanel({
   }
 
   return (
-    <div className="card" style={{ marginBottom: 14 }}>
-      <div className="sh" style={{ marginBottom: 10 }}>
-        <Ic id="i-id" w={15} />
-        <b>내 발신 이름</b>
+    <div className="card">
+      <div className="card-h">
+        <div>
+          <h2>내 발신 이름</h2>
+          <div className="desc">보낸 메시지에 함께 남는 이름입니다.</div>
+        </div>
       </div>
-      <div className="fhint" style={{ marginBottom: 10 }}>
-        대시보드에서 보낸 글은 거래처 방에 <b>[{preview || '이름'}] 내용</b> 형태로 나갑니다.
-        봇 계정 하나로 여러 담당자가 답하기 때문에, 접두가 없으면 거래처는 누가 말하는지 알 수
-        없습니다. <b>거래처가 보는 이름</b>이니 실명이나 직함으로 두세요.
-        <br />
-        담당자별로 각자 설정합니다. 이미 나간 메시지는 바뀌지 않습니다.
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-        <div className="fld" style={{ flex: '1 1 240px', marginBottom: 0 }}>
-          <label htmlFor="dsp-name">이름</label>
+      <div className="frow">
+        <div>
+          <div className="fl">이름</div>
+          <div className="fd">
+            대시보드에서 보낸 글은 거래처 방에 <b>[{preview || '이름'}] 내용</b> 형태로 나갑니다.
+            봇 계정 하나로 여러 담당자가 답하기 때문에, 접두가 없으면 거래처는 누가 말하는지 알 수
+            없습니다. 거래처가 보는 이름이니 실명이나 직함으로 두세요. 담당자별로 각자 설정하고,
+            이미 나간 메시지는 바뀌지 않습니다.
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <input
-            id="dsp-name"
-            className="tin"
+            className="input"
+            style={{ flex: '0 1 320px' }}
             value={value}
             maxLength={40}
             onChange={(e) => setValue(e.target.value)}
             placeholder="김담당"
+            aria-label="발신 이름"
           />
+          <button type="button" className="btn primary" disabled={pending || !preview || preview === saved} onClick={save}>
+            저장
+          </button>
+          {msg ? (
+            <div className="note" style={{ flexBasis: '100%', margin: 0 }}>
+              {msg}
+            </div>
+          ) : null}
         </div>
-        <button
-          type="button"
-          className="btn pri"
-          disabled={pending || !preview || preview === saved}
-          onClick={save}
-        >
-          저장
-        </button>
       </div>
-
-      {msg ? <div className="fnote" style={{ marginTop: 10 }}>{msg}</div> : null}
     </div>
   );
 }

@@ -36,7 +36,7 @@ export default async function Page({
     }
   }
   return (
-    <div className="auth-shell">
+    <div className="tsa auth-shell">
       <div className="auth-hero">
         <div className="auth-hero-kicker">{BRAND.name} · {BRAND.tagline}</div>
         <h1>

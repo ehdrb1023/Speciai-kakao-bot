@@ -6,7 +6,7 @@ import { canManageMembers } from '@/lib/auth';
 import { BRAND } from '@/lib/brand';
 import { MembersPanel, type MemberRow, type InvitationRow } from '@/lib/ui';
 import { listRooms, listRoomMessages, listRoomOutbound, listUnmatchedRooms } from '@/server/kakao';
-import { ConsoleShell } from '@/components/console/ConsoleShell';
+import { ConsoleShell, type HeroDef, type ViewKey } from '@/components/console/ConsoleShell';
 import { InboxView, type InboxViewData } from '@/components/console/views/InboxView';
 import {
   listPartners,
@@ -121,9 +121,8 @@ export default async function Page() {
 
   const linkedRoomCount = partners.reduce((sum, p) => sum + p.rooms.length, 0);
   const unhandled = rooms.filter((r) => !r.handled).length;
-
-  const roleLabel =
-    session.role === 'owner' ? '대표 · 소유자' : session.role === 'admin' ? '관리자' : '열람';
+  const messageCount = messageCountRes.count ?? 0;
+  const wsName = ws?.name ?? '워크스페이스';
 
   const members: MemberRow[] = (memberRes.data ?? []).map((m: any) => ({
     userId: m.user_id,
@@ -141,20 +140,81 @@ export default async function Page() {
     createdAt: i.created_at,
   }));
 
+  // 탭별 히어로. 숫자는 페이지 로드 시점 값이고, 미처리 방만 받은 카톡 폴링이 실시간 갱신한다.
+  const hero: Record<ViewKey, HeroDef> = {
+    kakao: {
+      eyebrow: '받은 카톡',
+      title: '들어온 거래처 대화',
+      lead: '등록된 방만 수집합니다. 규칙에 없는 방은 이름과 받은 횟수만 남고 본문은 저장되지 않습니다.',
+      stats: [
+        { k: '미처리 방', v: String(unhandled), unit: '개', alert: true, live: 'unhandled' },
+        { k: '수집된 방', v: String(rooms.length), unit: '개' },
+        { k: '전체 메시지', v: String(messageCount), unit: '건' },
+        { k: '연결 안 된 방', v: String(unmatched.length), unit: '개' },
+      ],
+    },
+    partners: {
+      eyebrow: '거래처',
+      title: `수집하고 있는 거래처 ${partners.length}곳`,
+      lead: '거래처를 먼저 등록해야 카톡방에서 #등록 명령을 쓸 수 있습니다. 방 연결은 언제든 바꿀 수 있습니다.',
+      stats: [
+        { k: '등록 거래처', v: String(partners.length), unit: '곳' },
+        { k: '연결된 방', v: String(linkedRoomCount), unit: '개' },
+        { k: '연결 안 된 방', v: String(unmatched.length), unit: '개', alert: unmatched.length > 0 },
+        { k: '전체 메시지', v: String(messageCount), unit: '건' },
+      ],
+    },
+    link: {
+      eyebrow: '연결 진단',
+      title:
+        unmatched.length > 0 ? `연결이 비어 있는 방 ${unmatched.length}개` : '모든 방이 연결돼 있어요',
+      lead: '방이 어느 거래처에도 안 붙으면 대화가 쌓이지 않습니다. 이름을 넣어 어떤 규칙에 걸리는지 먼저 확인하세요.',
+      stats: [
+        { k: '연결 안 된 방', v: String(unmatched.length), unit: '개', alert: unmatched.length > 0 },
+        { k: '연결된 방', v: String(linkedRoomCount), unit: '개' },
+        { k: '수집된 방', v: String(rooms.length), unit: '개' },
+        { k: '전체 메시지', v: String(messageCount), unit: '건' },
+      ],
+    },
+    settings: {
+      eyebrow: '설정',
+      title: `워크스페이스 ${wsName}`,
+      lead: '발화자 인식과 발신 이름, 멤버 권한을 여기서 관리합니다. 수집 전에 방 참여자에게 안내가 나갔는지 확인하세요.',
+      stats: [
+        { k: '멤버', v: String(members.length), unit: '명' },
+        { k: '초대 대기', v: String(invitations.length), unit: '명', alert: invitations.length > 0 },
+        { k: '직원 닉네임', v: String(staffAliases.length), unit: '개' },
+        { k: '등록 거래처', v: String(partners.length), unit: '곳' },
+      ],
+    },
+  };
+
   return (
     <ConsoleShell
       brandName={BRAND.name}
       brandMark={BRAND.mark}
-      brandSub={ws?.name ?? '업무 콘솔'}
+      brandSub={wsName}
       userName={session.displayName ?? session.email}
-      userRole={roleLabel}
-      badges={{ kakao: unhandled }}
+      badges={{ kakao: unhandled, link: unmatched.length }}
       isAdmin={canEdit}
       signOutAction={signOut}
+      hero={hero}
       slots={{
         kakao: <InboxView data={inboxData} />,
         partners: (
           <PartnersView
+            partners={partners}
+            canEdit={canEdit}
+            actions={{
+              createPartner,
+              deletePartner,
+              linkRoom,
+              unlinkRoom,
+            }}
+          />
+        ),
+        link: (
+          <LinkView
             partners={partners}
             unmatched={unmatched.map((u) => ({
               id: u.id,
@@ -163,18 +223,7 @@ export default async function Page() {
               lastSeenAt: u.lastSeenAt,
             }))}
             canEdit={canEdit}
-            actions={{
-              createPartner,
-              deletePartner,
-              linkRoom,
-              unlinkRoom,
-              adoptUnmatchedRoom,
-              dismissUnmatchedRoom,
-            }}
-          />
-        ),
-        link: (
-          <LinkView
+            actions={{ adoptUnmatchedRoom, dismissUnmatchedRoom }}
             status={{
               // 토큰 실제 값은 클라이언트로 내리지 않는다. 설정 여부만 전달.
               ingestTokenConfigured: !!process.env.KAKAO_INGEST_TOKEN,
@@ -192,13 +241,13 @@ export default async function Page() {
               appUrl: process.env.NEXT_PUBLIC_APP_URL ?? '',
               linkedRoomCount,
               roomCount: rooms.length,
-              messageCount: messageCountRes.count ?? 0,
+              messageCount,
               lastIngestAt: rooms[0]?.lastMessageAt ?? null,
             }}
           />
         ),
         settings: (
-          <>
+          <div className="stack">
             <DisplayNamePanel
               current={session.displayName ?? session.email.split('@')[0] ?? ''}
               saveAction={saveDisplayName}
@@ -209,7 +258,7 @@ export default async function Page() {
               saveAction={saveStaffAliases}
             />
             <MembersPanel
-              workspaceName={ws?.name ?? '워크스페이스'}
+              workspaceName={wsName}
               canManage={canEdit}
               members={members}
               invitations={invitations}
@@ -220,7 +269,7 @@ export default async function Page() {
               pendingAccounts={pendingAccounts}
               grantAccessAction={grantAccess}
             />
-          </>
+          </div>
         ),
       }}
     />

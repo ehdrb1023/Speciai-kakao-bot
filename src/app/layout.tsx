@@ -3,6 +3,10 @@ import { pretendard, notoSerifKr } from './fonts';
 import '@/lib/ui/globals.css';
 import './app.css';
 import '@/lib/ui/console-v2.css';
+// 콘솔 새 디자인(토스풍). .tss 아래로 스코프돼 auth·onboarding 화면과 충돌하지 않고,
+// 같은 클래스명이 겹칠 때는 나중 import + 높은 특이도로 이쪽이 이긴다.
+import './console-toss.css';
+import './auth-toss.css';
 
 export const metadata = {
   title: `${process.env.NEXT_PUBLIC_BRAND_NAME ?? '카톡 통합함'}`,

@@ -1,0 +1,364 @@
+/* 인증·온보딩 화면 토스풍 스킨. 콘솔(console-toss.css)과 같은 팔레트.
+ * 컴포넌트(AuthForms 등)는 그대로 두고 기존 auth-* 클래스를 .tsa 스코프에서 덮는다. */
+
+.tsa {
+  --g900: #191f28;
+  --g700: #333d4b;
+  --g600: #4e5968;
+  --g500: #6b7684;
+  --g400: #8b95a1;
+  --g300: #b0b8c1;
+  --g200: #e5e8eb;
+  --g100: #f2f4f6;
+  --g50: #f9fafb;
+  --pt: #3182f6;
+  --pt-dark: #1b64da;
+  --pt-soft: #eef4fe;
+  --red: #e5484d;
+  --red-soft: #fdecec;
+
+  background: #fff;
+  color: var(--g900);
+  font-size: 15px;
+  line-height: 1.6;
+  letter-spacing: -0.02em;
+  font-weight: 500;
+  -webkit-font-smoothing: antialiased;
+}
+.tsa *,
+.tsa *::before,
+.tsa *::after {
+  box-sizing: border-box;
+}
+.tsa button,
+.tsa input {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+.tsa :focus-visible {
+  outline: 3px solid rgba(49, 130, 246, 0.35);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+/* app.css 가 html/body 를 overflow:hidden 100vh 로 잠근다 — 인증 화면에서도 푼다. */
+html:has(.tsa),
+body:has(.tsa) {
+  overflow: auto;
+  height: auto;
+}
+
+/* ── 셸: 좌 히어로 · 우 폼 ─────────────────────────────────── */
+.tsa.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: stretch;
+}
+.tsa .auth-hero {
+  background: var(--g50);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 64px clamp(32px, 7vw, 96px);
+}
+.tsa .auth-hero-kicker {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--pt);
+  margin-bottom: 14px;
+}
+.tsa .auth-hero h1 {
+  margin: 0;
+  font-size: clamp(30px, 3.4vw, 42px);
+  font-weight: 800;
+  letter-spacing: -0.055em;
+  line-height: 1.25;
+  color: var(--g900);
+}
+.tsa .auth-hero p {
+  margin: 16px 0 0;
+  font-size: 16px;
+  color: var(--g500);
+  line-height: 1.7;
+}
+.tsa .auth-hero-note {
+  margin-top: 40px;
+  display: inline-block;
+  align-self: flex-start;
+  height: 32px;
+  line-height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: var(--g100);
+  color: var(--g500);
+  font-size: 13px;
+  font-weight: 600;
+}
+.tsa .auth-form-side {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+}
+
+/* 초대·온보딩처럼 히어로 없이 카드 하나만 있는 화면 */
+.tsa.auth-shell:not(:has(.auth-hero)) {
+  grid-template-columns: 1fr;
+  place-items: center;
+  background: var(--g50);
+  padding: 24px;
+}
+
+/* ── 카드 ─────────────────────────────────────────────────── */
+.tsa .auth-card {
+  width: 400px;
+  max-width: 100%;
+  background: #fff;
+  border: 1px solid var(--g100);
+  border-radius: 24px;
+  padding: 36px 32px;
+  box-shadow: 0 6px 24px rgba(25, 31, 40, 0.05);
+}
+.tsa .auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 26px;
+}
+.tsa .auth-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  background: var(--pt);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 19px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.tsa .auth-title {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.045em;
+  color: var(--g900);
+}
+.tsa .auth-sub {
+  font-size: 13.5px;
+  color: var(--g400);
+  font-weight: 500;
+  margin-top: 2px;
+}
+
+/* ── 폼 ───────────────────────────────────────────────────── */
+.tsa .auth-email-form,
+.tsa .auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.tsa .auth-field label {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--g600);
+  margin-bottom: 7px;
+}
+.tsa .auth-field input {
+  width: 100%;
+  height: 50px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--g100);
+  outline: none;
+  font-size: 15px;
+  font-weight: 500;
+  transition: box-shadow 0.15s, background 0.15s;
+}
+.tsa .auth-field input::placeholder {
+  color: var(--g400);
+}
+.tsa .auth-field input:focus {
+  background: #fff;
+  box-shadow: inset 0 0 0 2px var(--pt);
+}
+.tsa .auth-field input:disabled {
+  opacity: 0.6;
+}
+.tsa .auth-note {
+  margin-top: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--pt-soft);
+  color: var(--pt-dark);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+/* 제출 버튼 — 예전 .btn.btn-dark 를 토스 블루로 */
+.tsa .auth-submit,
+.tsa .btn.btn-dark,
+.tsa .btn.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 52px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 14px;
+  font-size: 15.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.06s;
+}
+.tsa .auth-submit,
+.tsa .btn.btn-dark {
+  background: var(--pt);
+  color: #fff;
+}
+.tsa .auth-submit:hover,
+.tsa .btn.btn-dark:hover {
+  background: var(--pt-dark);
+}
+.tsa .btn.btn-secondary {
+  background: var(--g100);
+  color: var(--g700);
+}
+.tsa .btn.btn-secondary:hover {
+  background: var(--g200);
+}
+.tsa .auth-submit:active {
+  transform: scale(0.985);
+}
+.tsa .auth-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ── 전환 링크·구분선 ─────────────────────────────────────── */
+.tsa .auth-links {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 14px;
+}
+.tsa .auth-switch {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 6px 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--g500);
+  text-align: center;
+  border-radius: 8px;
+}
+.tsa .auth-switch:hover {
+  color: var(--pt);
+}
+.tsa .auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  color: var(--g400);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.tsa .auth-divider::before,
+.tsa .auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--g100);
+}
+
+/* ── 카카오 버튼 ──────────────────────────────────────────── */
+.tsa .auth-kakao {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 52px;
+  border: 0;
+  border-radius: 14px;
+  background: #fee500;
+  color: #191600;
+  font-size: 15.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.15s, transform 0.06s;
+}
+.tsa .auth-kakao:hover {
+  filter: brightness(0.96);
+}
+.tsa .auth-kakao:active {
+  transform: scale(0.985);
+}
+.tsa .auth-kakao:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.tsa .auth-kakao-icon {
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* ── 알림·오류·완료 문구 ──────────────────────────────────── */
+.tsa .auth-notice {
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--pt-soft);
+  color: var(--pt-dark);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+.tsa .auth-error {
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+.tsa .auth-sent-title {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.045em;
+  color: var(--g900);
+  margin-bottom: 6px;
+}
+.tsa .auth-sent-text {
+  font-size: 14px;
+  color: var(--g500);
+  margin-bottom: 18px;
+}
+
+/* ── 반응형 ───────────────────────────────────────────────── */
+@media (max-width: 880px) {
+  .tsa.auth-shell {
+    grid-template-columns: 1fr;
+  }
+  .tsa .auth-hero {
+    padding: 48px 24px 36px;
+  }
+  .tsa .auth-hero-note {
+    margin-top: 24px;
+  }
+  .tsa .auth-form-side {
+    padding: 8px 20px 48px;
+  }
+  .tsa .auth-card {
+    border: 0;
+    box-shadow: none;
+    padding: 24px 4px;
+  }
+}
