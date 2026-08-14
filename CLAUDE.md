@@ -243,6 +243,32 @@ summaryText → infoText) 순으로 찾는다. 카톡이 화면에 안 띄우는
 먼저 막고, 새더라도 서버 멱등키 `(room_id, content_hash)` 가 한 번 더 막는다.
 알림 콜백은 메인 스레드로 오는 단말이 있어 인입은 반드시 별도 스레드에서 돈다.
 
+## 첨부 (사진·파일)
+
+**둘 다 같은 통로로 온다.** 안드로이드 MessagingStyle 알림의 각 메시지 번들에 `uri`(첨부의
+`content://` 주소)와 `type`(MIME)이 실린다. `NotificationListenerService` 는 알림에 실린 URI 에
+일시적 읽기 권한을 받으므로 카톡의 첨부를 그대로 열 수 있다 — **종류를 가리지 않는 권한이라
+사진이 되면 PDF 도 된다.**
+
+한동안 파일이 안 됐던 이유는 권한이나 API 가 아니라, 받은 스트림을 무조건
+`BitmapFactory.decodeStream` 에 넣고 null 이면 "사진 실패" 로 버렸기 때문이다. 지금은
+`type` 을 먼저 보고 갈래를 나눈다(`extractNotiAttachment`).
+
+| | 사진 | 파일(PDF·DOCX…) |
+|---|---|---|
+| 봇 → 서버 | `image`·`imageName` | `file`·`fileName`·`fileMime` |
+| 크기 처리 | 1600px·JPEG80 으로 줄여 보냄 | **줄일 수 없다** — base64 3MB 넘으면 이름만 |
+| 저장 | `kakao-attachments` 버킷, `attachment.type='image'` | 같은 버킷, `type='file'` |
+| 화면 | 말풍선 안에 미리보기 | `📎 이름` 링크 |
+
+- **`fileName` 만 오고 `file` 이 없으면 "이름은 알지만 바이트는 못 실었다"** 는 뜻이다
+  (상한 초과·재전송 큐를 거친 경우). 서버는 본문에 `[파일] 이름` 을 적는다. 이걸 지우지 말 것 —
+  무엇이 왔는지조차 안 남으면 사람이 카톡에서 그 파일을 찾을 단서가 없다.
+- **URI 권한은 알림이 살아 있는 동안만 유효하다.** 도착 즉시 바이트까지 다 읽어야 하고,
+  큐에 넣었다가 나중에 읽는 구조로 바꾸면 조용히 실패한다.
+- 첨부는 **규칙에 걸리는 방일 때만** 연다(`PHOTO_ONLY_FROM_KNOWN_ROOMS`). 서버가 어차피
+  버리기도 하지만, 그보다 개인 카톡의 사진·문서가 단말 메모리를 거치게 할 이유가 없다.
+
 ## 발화자 판정
 
 `workspaces.staff_aliases`(설정 탭에서 등록)에 있는 이름이면 `side='us'`, 아니면 `'partner'`.

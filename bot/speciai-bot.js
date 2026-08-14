@@ -31,8 +31,12 @@
  *   GET  {RULES_ENDPOINT} 헤더 X-Ingest-Token: {TOKEN}
  *        → { version, rules: [{ kind, pattern }] }  연결된 방 목록
  *   POST {ENDPOINT}       헤더 X-Ingest-Token: {TOKEN}
- *        → { room, sender, text, ts, chatId?, logId?, image?, imageName? }
+ *        → { room, sender, text, ts, chatId?, logId?, image?, imageName?,
+ *              file?, fileName?, fileMime? }
  *          ts 는 단말이 메시지를 받은 시각. 재전송으로 늦게 도착해도 원래 시각으로 남는다.
+ *          image 는 사진(리사이즈·JPEG), file 은 그 외 첨부(PDF·DOCX…)를 원본 그대로.
+ *          fileName 만 오고 file 이 없으면 "이름은 알지만 바이트는 못 실었다" 는 뜻이다
+ *          (상한 초과·재전송 큐). 서버는 본문에 "[파일] 이름" 으로 적는다.
  *        ← { ok, inserted, skipped, unmatched?, registered?, unregistered?, outbox? }
  *          registered/unregistered 가 오면 규칙을 즉시 다시 받아온다.
  *          outbox 가 실려 오면 그 방으로 나갈 발신 건이다(거래처가 방금 말한 방이라 세션이 확실).
@@ -538,11 +542,20 @@ function queueSave(items) {
 function enqueue(obj) {
   var items = queueLoad();
 
-  // 사진은 큐에 넣지 않는다. base64 가 수백 KB~수 MB 라 몇 건만 쌓여도 파일이 폰을 채운다.
-  // 본문과 "사진이 있었다"는 사실은 남기고 이미지만 버린다.
-  if (obj.image) {
+  // 첨부 바이트는 큐에 넣지 않는다. base64 가 수백 KB~수 MB 라 몇 건만 쌓여도 파일이 폰을
+  // 채운다. 본문과 "무엇이 왔는지" 는 남기고 바이트만 버린다.
+  //
+  // 파일은 이름을 남긴다 — 나중에 사람이 카톡에서 그 파일을 찾을 단서가 된다.
+  // 사진은 이름이 기계가 지은 것(kakao-<시각>.jpg)이라 남겨봐야 단서가 못 된다.
+  if (obj.image || obj.file) {
+    var keepName = obj.file ? obj.fileName : '';
     obj = buildPayloadObj(obj.room, obj.sender, obj.text, null, obj.chatId, obj.logId, obj.ts);
-    Log.e('kakao-bot[큐] 사진은 제외하고 본문만 적재 — 재전송 시 이미지는 빠진다');
+    if (keepName) {
+      obj.fileName = keepName;
+      Log.e('kakao-bot[큐] 파일 본문은 제외하고 이름만 적재 — "' + keepName + '"');
+    } else {
+      Log.e('kakao-bot[큐] 사진은 제외하고 본문만 적재 — 재전송 시 이미지는 빠진다');
+    }
   }
 
   items.push(obj);
@@ -1004,13 +1017,34 @@ function startOutboxLoop() {
 // 그 시각으로 기록돼 순서가 뒤집힌다. 더 나쁜 건 멱등 키다 — 서버 해시가
 // md5(분단위시각|발화자|본문) 라 분이 달라지면 해시도 달라지고, 첫 전송이 실제로는 성공했는데
 // 응답만 못 받은 경우 같은 메시지가 두 번 저장된다.
-function buildPayloadObj(room, sender, text, imageB64, chatId, logId, ts) {
+/**
+ * 첨부 인자를 한 모양으로 맞춘다.
+ *
+ * 구 API 경로(extractImage)는 base64 **문자열**을 그대로 넘기고, 알림 경로는
+ * { b64, name, mime, isImage } **객체**를 넘긴다. 두 경로를 한쪽으로 통일하지 않는 이유는
+ * 구 API 쪽이 파일을 줄 수 없어서다(알림에만 URI 가 실린다). 받는 쪽에서 한 번 정규화한다.
+ */
+function normalizeAtt(att) {
+  if (!att) return null;
+  if (typeof att === 'string') return { b64: att, name: '', mime: 'image/jpeg', isImage: true };
+  return att;
+}
+
+function buildPayloadObj(room, sender, text, att, chatId, logId, ts) {
   var obj = { room: room, sender: sender, text: text, ts: ts || nowIso() };
   if (chatId) obj.chatId = String(chatId);
   if (logId) obj.logId = String(logId);
-  if (imageB64) {
-    obj.image = imageB64;
-    obj.imageName = 'kakao-' + _now() + '.jpg';
+
+  var a = normalizeAtt(att);
+  if (a && a.isImage && a.b64) {
+    obj.image = a.b64;
+    obj.imageName = a.name || ('kakao-' + _now() + '.jpg');
+  } else if (a && !a.isImage) {
+    // 파일은 바이트가 없어도 보낸다 — 상한을 넘었어도 "무엇이 왔는지" 는 남아야 한다.
+    // 서버가 file 없이 fileName 만 오면 본문에 "[파일] 이름" 으로 적는다.
+    obj.fileName = a.name || ('kakao-' + _now() + '.bin');
+    if (a.mime) obj.fileMime = a.mime;
+    if (a.b64) obj.file = a.b64;
   }
   return obj;
 }
@@ -1086,7 +1120,7 @@ function postPayload(obj) {
 // ── 수집 본체 (구·신 API 공통) ────────────────────────────────
 //
 // tsOverride: 메시지 자신의 시각(알림에서 꺼낸 것). 없으면 지금 시각을 쓴다.
-function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, reply, tsOverride) {
+function handleMessage(room, msg, sender, isGroupChat, att, chatId, logId, reply, tsOverride) {
   if (HANDLE_GROUP_ONLY && !isGroupChat) return;
 
   // 메시지가 도착한 시각을 여기서 못 박는다. 큐에 들어가 나중에 보내도 이 값이 따라간다.
@@ -1094,7 +1128,8 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
 
   var text = trimText(msg);
   var hasText = text.length > 0;
-  if (!hasText && !imageB64) return; // 입장·퇴장 같은 시스템 메시지
+  var attach = normalizeAtt(att);
+  if (!hasText && !attach) return; // 입장·퇴장 같은 시스템 메시지
 
   // 전송 확인은 서버·규칙과 무관하게 단말에서만 끝난다. 그래서 제일 앞에 둔다 —
   // 서버가 죽어 있어도(402·네트워크 단절) 발신 경로를 점검할 수 있어야 한다.
@@ -1154,10 +1189,11 @@ function handleMessage(room, msg, sender, isGroupChat, imageB64, chatId, logId, 
     return;
   }
 
-  // 명령은 사진을 함께 올리지 않는다 — 서버가 저장하지 않고 버리므로 보낼 이유가 없다.
-  // 규칙 밖 방의 사진도 마찬가지다(서버가 업로드 전에 매칭을 먼저 본다).
-  var photo = (cmd || (PHOTO_ONLY_FROM_KNOWN_ROOMS && !known)) ? null : imageB64;
-  var obj = buildPayloadObj(room, sender, text, photo, chatId, logId, ts);
+  // 명령은 첨부를 함께 올리지 않는다 — 서버가 저장하지 않고 버리므로 보낼 이유가 없다.
+  // 규칙 밖 방의 첨부도 마찬가지다(서버가 업로드 전에 매칭을 먼저 본다).
+  // 사진뿐 아니라 파일도 같은 정책이다. 파일이 더 크면 컸지 작지 않다.
+  var sendAtt = (cmd || (PHOTO_ONLY_FROM_KNOWN_ROOMS && !known)) ? null : attach;
+  var obj = buildPayloadObj(room, sender, text, sendAtt, chatId, logId, ts);
   var res = postPayload(obj);
   if (!res.ok && res.retry) enqueue(obj);
 }
@@ -1187,11 +1223,11 @@ var NOTI_STALE_MS = 120000;
  * 그것을 제대로 채워 넣으면 "빈 칸" 자체가 생기지 않고, 물려받기가 필요 없어진다
  * (notiRoomOf 참고). 그래서 여기서는 물려받지 않는다.
  */
-function _rememberNoti(sender, room, text, imageB64) {
+function _rememberNoti(sender, room, text, att) {
   var rec = {
     room: room || '',
     text: (text !== null && text !== undefined) ? String(text) : '',
-    image: imageB64 || null,
+    image: att || null,
     at: _now(),
   };
   if (sender) _notiBySender[String(sender)] = rec;
@@ -1305,8 +1341,10 @@ function _lookupNotiText(sender) {
 }
 
 /**
- * 발신자의 최근 알림에서 꺼낸 사진. 메신저봇R 이 이미지를 안 줄 때의 유일한 경로다.
- * 사진은 한 번만 쓴다 — 꺼내면 지운다. 안 지우면 뒤따르는 텍스트 메시지에 같은 사진이 또 붙는다.
+ * 발신자의 최근 알림에서 꺼낸 첨부(사진 또는 파일). 메신저봇R 이 첨부를 안 줄 때의 유일한
+ * 경로다. 한 번만 쓴다 — 꺼내면 지운다. 안 지우면 뒤따르는 텍스트 메시지에 같은 첨부가 또 붙는다.
+ * 담기는 값은 { b64, name, mime, isImage } 객체다(구 API 경로의 문자열과 함께
+ * normalizeAtt 가 받아준다).
  */
 function _takeNotiImage(sender) {
   var now = _now();
@@ -1416,6 +1454,125 @@ function bitmapFromNotiMessages(ex, tried) {
   }
   tried.push('messages=uri없음');
   return null;
+}
+
+// ── 알림에서 파일(PDF·DOCX 등) 꺼내기 ────────────────────────
+//
+// 사진과 **같은 통로**다. MessagingStyle 의 각 메시지 번들에는 두 칸이 있다.
+//
+//   uri   첨부의 content:// 주소
+//   type  MIME 타입 (image/jpeg · application/pdf · ...)
+//
+// 사진 경로는 이 uri 를 열어 비트맵으로 디코딩한다. 그래서 PDF 가 오면 디코딩이 null 을
+// 뱉고 "사진 실패" 로 버려졌다 — 파일을 못 가져오는 게 아니라, 파일인지 보지도 않고
+// 버리고 있었다. type 을 읽어 갈래를 나누면 같은 권한으로 그대로 읽힌다.
+// (NotificationListenerService 는 알림에 실린 URI 에 일시적 읽기 권한을 받는다.
+//  종류를 가리지 않는 권한이라 사진이 되면 파일도 된다.)
+//
+// ⚠️ 그 권한은 **알림이 살아 있는 동안만** 유효하다. 도착 즉시 읽어야 하고, 큐에 넣었다가
+//    나중에 읽으려 하면 실패한다. 그래서 여기서 바이트까지 다 뽑아 base64 로 들고 간다.
+var FILE_MAX_BASE64 = 3 * 1024 * 1024;
+
+/** 이 알림에 첨부가 실려 있나. 바이트를 읽기 전에 type·이름만 본다(비용 없음). */
+function notiAttachmentInfo(ex) {
+  var arr = null;
+  try { arr = ex.get('android.messages'); } catch (e) { return null; }
+  if (arr === null || arr === undefined) return null;
+
+  for (var i = arr.length - 1; i >= 0; i--) {
+    try {
+      var bundle = arr[i];
+      if (!bundle || !bundle.get) continue;
+      var uri = bundle.get('uri');
+      if (uri === null || uri === undefined) continue;
+      var mime = bundle.get('type');
+      return {
+        uri: (typeof uri === 'string') ? android.net.Uri.parse(uri) : uri,
+        mime: (mime === null || mime === undefined) ? '' : String(mime)
+      };
+    } catch (e2) {}
+  }
+  return null;
+}
+
+/** content:// 의 원본 파일명. 알림 문구에 이름이 없어도 여기서 나온다. */
+function uriDisplayName(uri) {
+  var ctx = appContext();
+  if (ctx === null) return '';
+  var cur = null;
+  try {
+    cur = ctx.getContentResolver().query(uri, null, null, null, null);
+    if (cur === null || !cur.moveToFirst()) return '';
+    var idx = cur.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+    if (idx < 0) return '';
+    var v = cur.getString(idx);
+    return (v === null || v === undefined) ? '' : String(v);
+  } catch (e) {
+    return '';
+  } finally {
+    if (cur !== null) { try { cur.close(); } catch (e2) {} }
+  }
+}
+
+/** URI 를 통째로 읽어 base64 로. 상한을 넘으면 null(이름만 남긴다). */
+function uriToBase64(uri) {
+  var ctx = appContext();
+  if (ctx === null) return null;
+  var stream = null;
+  try {
+    stream = ctx.getContentResolver().openInputStream(uri);
+    if (stream === null) return null;
+    var bos = new java.io.ByteArrayOutputStream();
+    var buf = java.lang.reflect.Array.newInstance(java.lang.Byte.TYPE, 8192);
+    var n = stream.read(buf);
+    while (n > 0) {
+      bos.write(buf, 0, n);
+      // base64 는 원본의 약 4/3 이다. 넘길 게 뻔하면 더 읽지 않는다.
+      if (bos.size() * 4 / 3 > FILE_MAX_BASE64) { bos.close(); return null; }
+      n = stream.read(buf);
+    }
+    var bytes = bos.toByteArray();
+    bos.close();
+    var b64 = String(android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP));
+    return (b64.length > FILE_MAX_BASE64) ? null : b64;
+  } catch (e) {
+    Log.e('kakao-bot[NOTI] 파일 읽기 실패: ' + e);
+    return null;
+  } finally {
+    if (stream !== null) { try { stream.close(); } catch (e3) {} }
+  }
+}
+
+/**
+ * 이 알림의 첨부. 반환 형태는 handleMessage 가 그대로 들고 간다.
+ *   { b64, name, mime, isImage }   b64 가 null 이면 이름만 남긴다(상한 초과·읽기 실패)
+ */
+function extractNotiAttachment(ex, body) {
+  var info = notiAttachmentInfo(ex);
+
+  // 첨부 URI 가 없으면 예전 경로만 시도한다 — android.picture(BigPictureStyle)는
+  // messages 번들 밖에 있어서 여기 안 잡힌다.
+  if (info === null) {
+    if (!looksLikePhoto(body)) return null;
+    var b64only = extractNotiImage(ex);
+    return b64only ? { b64: b64only, name: '', mime: 'image/jpeg', isImage: true } : null;
+  }
+
+  var name = uriDisplayName(info.uri);
+  var isImage = (info.mime.indexOf('image/') === 0);
+  Log.i('kakao-bot[NOTI] 첨부 발견 type="' + info.mime + '" name="' + name + '"');
+
+  if (isImage) {
+    // 사진은 기존 경로 그대로 — 리사이즈·JPEG 재압축으로 상한 아래에 묶는다.
+    var img = extractNotiImage(ex);
+    return img ? { b64: img, name: name, mime: 'image/jpeg', isImage: true } : null;
+  }
+
+  var b64 = uriToBase64(info.uri);
+  if (b64 === null) {
+    Log.e('kakao-bot[NOTI] 파일 본문 생략(상한 초과·읽기 실패) — 이름만 보낸다: "' + name + '"');
+  }
+  return { b64: b64, name: name, mime: info.mime, isImage: false };
 }
 
 function extractNotiImage(ex) {
@@ -1739,17 +1896,21 @@ function handleKakaoNoti(sbn) {
     // 이 방으로 나갈 답장 통로를 잡아둔다. API2 가 없는 단말에서는 이것이 유일한 발신 경로다.
     captureReplyAction(sbn, roomToSave);
 
-    // 사진은 "규칙에 걸리는 방" + "사진 알림" 일 때만 꺼낸다.
+    // 첨부(사진·파일)는 "규칙에 걸리는 방" 일 때만 꺼낸다.
     //
-    // 방을 먼저 확인하는 이유가 핵심이다 — 개인 카톡·가족방 사진까지 디코딩하면
-    // 전송은 안 하더라도 개인 사진이 이 단말의 메모리를 거치게 된다. 그럴 이유가 없다.
-    // 비트맵 디코딩·리사이즈가 무거운 작업이라는 점도 있다.
-    var notiImage = null;
-    if (roomToSave && looksLikePhoto(notiBody) && isAllowedRoom(roomToSave)) {
-      notiImage = extractNotiImage(ex);
+    // 방을 먼저 확인하는 이유가 핵심이다 — 개인 카톡·가족방 첨부까지 열면 전송은 안 하더라도
+    // 개인 사진·문서가 이 단말의 메모리를 거치게 된다. 그럴 이유가 없다.
+    // 디코딩·리사이즈가 무거운 작업이라는 점도 있다.
+    //
+    // 본문 문구(looksLikePhoto)로 거르던 것을 첨부 URI 유무로 바꿨다. 파일 알림이 어떤
+    // 문구로 오는지 단말마다 달라서, 문구를 맞히는 것보다 알림에 실제로 첨부가 실렸는지
+    // 보는 쪽이 확실하다. 문구 판정은 URI 가 없을 때(BigPictureStyle)만 폴백으로 남는다.
+    var notiAtt = null;
+    if (roomToSave && isAllowedRoom(roomToSave)) {
+      notiAtt = extractNotiAttachment(ex, notiBody);
     }
 
-    _rememberNoti(sender, roomToSave, notiBody, notiImage);
+    _rememberNoti(sender, roomToSave, notiBody, notiAtt);
 
     // 안 올리기로 했으면 **왜** 안 올리는지를 남긴다. 여기서 조용히 빠져나가면
     // 대시보드는 "수집된 방 0" 인데 로그에는 아무 단서도 없다(2026-08-12 에 그랬다).
@@ -1758,7 +1919,7 @@ function handleKakaoNoti(sbn) {
         Log.e('kakao-bot[NOTI] 수집 생략 — 방을 특정 못 함. ' + notiIdentityLog(sbn, ex));
       } else if (!sender) {
         Log.e('kakao-bot[NOTI] 수집 생략 — 발신자를 못 읽음 room="' + roomToSave + '"');
-      } else if (!trimText(notiBody) && !notiImage) {
+      } else if (!trimText(notiBody) && !notiAtt) {
         Log.e('kakao-bot[NOTI] 수집 생략 — 본문이 비었다 room="' + roomToSave
           + '". 카톡·안드로이드 알림 설정에서 내용 미리보기가 꺼져 있으면 이렇게 된다.');
       } else if (msgAt && (_now() - msgAt) > NOTI_STALE_MS) {
@@ -1773,7 +1934,7 @@ function handleKakaoNoti(sbn) {
         ingestFromNoti(roomToSave, notiBody, sender, isGroup, null, '');
       } else {
         Log.i('kakao-bot[NOTI] 수집 시도 room="' + roomToSave + '"');
-        ingestFromNoti(roomToSave, notiBody, sender, isGroup, notiImage,
+        ingestFromNoti(roomToSave, notiBody, sender, isGroup, notiAtt,
           msgAt ? isoFromMillis(msgAt) : '');
       }
     }
@@ -1786,13 +1947,13 @@ function handleKakaoNoti(sbn) {
  * 알림에서 곧바로 수집한다. 알림 콜백은 메인 스레드로 오는 단말이 있어
  * (NetworkOnMainThreadException) 네트워크는 반드시 별도 스레드에서 돈다.
  */
-function ingestFromNoti(room, text, sender, isGroup, imageB64, ts) {
+function ingestFromNoti(room, text, sender, isGroup, att, ts) {
   try {
-    if (!trimText(text) && !imageB64) return;
+    if (!trimText(text) && !att) return;
     var t = new java.lang.Thread(new java.lang.Runnable({
       run: function () {
         try {
-          handleMessage(room, text, sender, isGroup, imageB64, null, null, null, ts);
+          handleMessage(room, text, sender, isGroup, att, null, null, null, ts);
         } catch (e) { Log.e('kakao-bot[NOTI] 수집 예외: ' + e); }
       }
     }));
@@ -1813,7 +1974,7 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-12r DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-14a DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);

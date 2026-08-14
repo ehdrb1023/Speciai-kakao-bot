@@ -833,6 +833,15 @@ export function InboxView({ data }: { data: InboxViewData }) {
   );
 }
 
+/**
+ * 본문 없이 첨부만 온 메시지에 서버가 붙이는 자리표시 문구(`ingestBotMessage` 와 같은 규칙).
+ * 화면에서 첨부를 이미 보여주므로 같은 말을 한 번 더 적지 않으려고 대조용으로 쓴다.
+ */
+function autoLabel(att: InboxMessage['attachment']): string | null {
+  if (!att) return null;
+  return att.type === 'file' ? `[파일] ${att.name}` : `[사진] ${att.name}`;
+}
+
 /** 날짜가 바뀌는 지점에 구분선을 넣고, 같은 사람의 연속 발화는 말풍선만 이어 붙인다(카톡과 같은 읽기 리듬). */
 function renderMessages(messages: InboxMessage[], staffLabel: string) {
   if (messages.length === 0) {
@@ -872,8 +881,24 @@ function renderMessages(messages: InboxMessage[], staffLabel: string) {
             <div className="bub">
               {m.attachment?.url ? (
                 <>
-                  <img src={m.attachment.url} alt={m.attachment.name} />
-                  {m.body ? <span>{m.body}</span> : null}
+                  {/* 사진은 그 자리에서 보여주고, 그 외 첨부(PDF·DOCX…)는 링크로 준다.
+                      파일을 <img> 로 그리면 깨진 이미지 아이콘만 남아 "안 왔다" 로 읽힌다. */}
+                  {m.attachment.type === 'image' ? (
+                    <img src={m.attachment.url} alt={m.attachment.name} />
+                  ) : (
+                    <a
+                      className="att-file"
+                      href={m.attachment.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={m.attachment.name}
+                      style={{ color: 'inherit', textDecoration: 'underline', wordBreak: 'break-all' }}
+                    >
+                      📎 {m.attachment.name}
+                    </a>
+                  )}
+                  {/* 본문이 서버가 지어준 자리표시(“[파일] 이름”)면 링크와 같은 말이라 빼둔다. */}
+                  {m.body && m.body !== autoLabel(m.attachment) ? <span>{m.body}</span> : null}
                 </>
               ) : (
                 m.body

@@ -244,7 +244,13 @@ export async function ingestBotMessage(
   const sentAt = parseTs(input.ts);
   const aliases = await loadStaffAliases(sb, input.workspaceId);
   const side = isStaffSpeaker(speaker, aliases) ? 'us' : 'partner';
-  const storedBody = body || `[사진] ${input.attachment?.name ?? '이미지'}`;
+  // 본문 없이 첨부만 온 경우의 표시 문구. 사진과 파일을 구분한다 — 목록 미리보기에서
+  // "[사진]" 만 뜨면 발주서 PDF 가 왔는지 사진이 왔는지 알 수 없다.
+  const storedBody =
+    body ||
+    (input.attachment?.type === 'file'
+      ? `[파일] ${input.attachment.name}`
+      : `[사진] ${input.attachment?.name ?? '이미지'}`);
 
   const hash = contentHash({ logId: input.logId, sentAt, speaker, body: storedBody });
 

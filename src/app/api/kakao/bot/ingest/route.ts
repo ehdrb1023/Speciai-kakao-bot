@@ -20,11 +20,15 @@ import { ingestTokenValid } from '@/server/kakao/ingest-token';
 // 세션(브라우저 로그인) 대신 머신 토큰 인증 → service-role 로 RLS 우회.
 //
 // 인증: X-Ingest-Token = KAKAO_INGEST_TOKEN
-// 입력: { room, sender, text, chatId?, logId?, ts?, image?, imageName? }
+// 입력: { room, sender, text, chatId?, logId?, ts?, image?, imageName?,
+//         file?, fileName?, fileMime? }
 //   room     카톡 방 제목 → partner_room_rules 로 거래처 매칭
 //   chatId   API2 방 ID. 있으면 방 제목이 바뀌어도 같은 방으로 이어진다
 //   logId    API2 메시지 ID. 있으면 멱등 키로 그대로 쓴다
 //   image    사진 메시지 base64(data: 접두어 없이). 텍스트 없이 사진만 있어도 받는다
+//   file     사진이 아닌 첨부(PDF·DOCX…) base64. 원본 그대로다 — 줄일 수 없는 형식이라
+//            봇이 상한(base64 3MB)을 넘으면 바이트 없이 fileName 만 보낸다.
+//            그 경우 본문에 "[파일] 이름" 만 남는다. 무엇이 왔는지는 알아야 하기 때문이다.
 // 출력: { ok, inserted, skipped, unmatched? }
 //   unmatched=true 는 규칙 미매칭. 봇이 그 방을 로컬 차단 목록에 넣는 신호로도 쓴다.
 //
@@ -46,12 +50,18 @@ export async function POST(req: Request) {
     ts?: string;
     image?: string;
     imageName?: string;
+    file?: string;
+    fileName?: string;
+    fileMime?: string;
   } | null;
 
   const hasImage = !!body?.image;
-  if (!body?.room || !body?.sender || (!body.text && !hasImage)) {
+  // fileName 만 오고 file 이 없는 경우가 있다 — 상한을 넘었거나 재전송 큐를 거친 첨부다.
+  // 그때도 "무엇이 왔는지" 는 남겨야 하므로 본문 없는 메시지로 취급하지 않는다.
+  const hasFileName = !!body?.fileName;
+  if (!body?.room || !body?.sender || (!body.text && !hasImage && !hasFileName)) {
     return NextResponse.json(
-      { error: 'room, sender, 그리고 text 또는 image 가 필요합니다' },
+      { error: 'room, sender, 그리고 text · image · fileName 중 하나가 필요합니다' },
       { status: 400 },
     );
   }
@@ -79,9 +89,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, inserted: 0, skipped: 0, unmatched: true });
   }
 
-  const attachment = hasImage
-    ? await storeImage(sb, workspaceId, body.image!, body.imageName)
-    : null;
+  // 사진은 이미 JPEG 로 재압축돼 오고, 파일은 원본 그대로 온다. 저장 경로는 같다.
+  let attachment: { path: string; type: string; name: string } | null = null;
+  if (hasImage) {
+    attachment = await storeAttachment(sb, workspaceId, body.image!, body.imageName, 'image/jpeg', 'image');
+  } else if (body.file) {
+    attachment = await storeAttachment(
+      sb, workspaceId, body.file, body.fileName, body.fileMime || 'application/octet-stream', 'file',
+    );
+  }
+
+  // 바이트를 못 실은 파일은 이름을 본문에 적는다. 여기서 안 적으면 "빈 메시지" 가 되어
+  // 저장 자체가 거부되고, 카톡방에 무엇이 왔는지 흔적조차 남지 않는다.
+  const text =
+    body.text?.trim() || (!attachment && hasFileName ? `[파일] ${body.fileName}` : body.text ?? '');
 
   const result = await ingestBotMessage(
     {
@@ -89,7 +110,7 @@ export async function POST(req: Request) {
       chatId: body.chatId,
       roomName: body.room,
       speaker: body.sender,
-      text: body.text ?? '',
+      text,
       logId: body.logId,
       ts: body.ts,
       attachment,
@@ -226,27 +247,30 @@ async function handleRoomCommand(
   });
 }
 
-async function storeImage(
+async function storeAttachment(
   sb: SupabaseClient,
   workspaceId: string,
   base64: string,
   name: string | undefined,
+  contentType: string,
+  kind: 'image' | 'file',
 ): Promise<{ path: string; type: string; name: string } | null> {
   try {
     const { createHash } = await import('node:crypto');
     const bytes = Buffer.from(base64.replace(/^data:[^;]+;base64,/, ''), 'base64');
-    const safeName = (name || 'kakao-image.jpg').replace(/[^\w.\-가-힣]/g, '_');
+    const fallback = kind === 'image' ? 'kakao-image.jpg' : 'kakao-file.bin';
+    const safeName = (name || fallback).replace(/[^\w.\-가-힣]/g, '_');
     // 파일명 충돌 방지 — 내용 해시 접두어. Date/Math 를 쓰지 않아 재전송해도 같은 경로가 된다.
     const prefix = createHash('md5').update(bytes).digest('hex').slice(0, 10);
     const path = `${workspaceId}/${prefix}-${safeName}`;
     const { error } = await sb.storage
       .from('kakao-attachments')
-      .upload(path, bytes, { contentType: 'image/jpeg', upsert: true });
+      .upload(path, bytes, { contentType, upsert: true });
     if (error) {
-      console.error('[kakao] 이미지 업로드 실패', error.message);
+      console.error('[kakao] 첨부 업로드 실패', error.message);
       return null;
     }
-    return { path, type: 'image', name: safeName };
+    return { path, type: kind, name: safeName };
   } catch (e) {
     // 사진을 못 올려도 텍스트는 저장해야 한다. 여기서 500 을 내면 봇이 전체를 재전송한다.
     console.error('[kakao] 이미지 처리 예외', e);
