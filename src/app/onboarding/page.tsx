@@ -3,7 +3,9 @@ import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/auth/server';
 import { OnboardingClient } from '@/components/OnboardingClient';
 import { createWorkspace } from '@/server/actions/workspace';
+import { signOut } from '@/server/actions/auth';
 import { getServerClient } from '@/lib/db';
+import { BRAND } from '@/lib/brand';
 
 export const metadata = { title: '워크스페이스 만들기' };
 
@@ -34,6 +36,52 @@ export default async function Page() {
     if (pending?.token) {
       redirect(`/auth/invite?token=${encodeURIComponent(pending.token as string)}`);
     }
+  }
+
+  // 워크스페이스가 이미 있으면 만들기 화면을 아예 보여주지 않는다.
+  //
+  // 초대장 유무로만 걸렀더니, 승인제로 바꾼 뒤(29bcd0f) 대기자에게는 초대장이 없어 그대로
+  // 만들기 버튼을 보게 됐다. 누른 계정은 자기 소유의 빈 워크스페이스로 들어가고 사내
+  // 데이터가 둘로 갈라진다. 버튼을 없애는 것이 안내문을 고치는 것보다 확실하다.
+  // (서버 액션 createWorkspace 도 같은 조건으로 한 번 더 막는다 — 화면은 우회될 수 있다.)
+  const anchored = !!process.env.KAKAO_WORKSPACE_ID?.trim();
+  let exists = anchored;
+  if (!exists) {
+    const { count, error } = await getServerClient()
+      .from('workspaces')
+      .select('id', { count: 'exact', head: true });
+    exists = !!error || (count ?? 0) > 0; // 세지 못했으면 만들지 않는다(fail-closed)
+  }
+
+  if (exists) {
+    return (
+      <div className="tsa auth-shell">
+        <div className="auth-card">
+          <div className="auth-brand">
+            <div className="auth-logo">{BRAND.mark}</div>
+            <div>
+              <div className="auth-title">승인 대기 중</div>
+              <div className="auth-sub">
+                {session.displayName ?? email} ({email})
+              </div>
+            </div>
+          </div>
+          <p className="auth-note">
+            가입은 끝났습니다. 관리자가 <b>멤버 관리 → 가입 대기</b>에서 권한을 주면 바로
+            콘솔이 열립니다. 이 화면을 새로고침해 확인하세요.
+          </p>
+          <p className="auth-note">
+            워크스페이스는 사내에 하나뿐이라 직접 만들 수 없습니다. 거래처 대화가 갈라져
+            쌓이는 것을 막기 위한 제한입니다.
+          </p>
+          <form action={signOut}>
+            <button type="submit" className="btn auth-submit">
+              로그아웃
+            </button>
+          </form>
+        </div>
+      </div>
+    );
   }
 
   return (

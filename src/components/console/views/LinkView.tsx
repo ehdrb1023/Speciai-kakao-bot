@@ -24,10 +24,10 @@ export interface LinkActions {
 
 export interface LinkStatus {
   ingestTokenConfigured: boolean;
+  /** KAKAO_WORKSPACE_ID 가 설정돼 있다. 설정돼 있으면 콘솔도 그 워크스페이스만 본다. */
   workspaceIdConfigured: boolean;
-  /** env 의 KAKAO_WORKSPACE_ID 가 지금 이 워크스페이스가 아니다 — 봇이 올린 것이 여기 안 뜬다. */
-  workspaceIdMismatch: boolean;
-  expectedWorkspaceId: string;
+  /** 지금 보고 있는 워크스페이스 ID. 미설정일 때 넣을 값으로만 쓴다. */
+  currentWorkspaceId: string;
   appUrl: string;
   /** "#등록" 으로 거래처에 붙은 방 수. 0 이면 봇이 모든 방을 걸러낸다. */
   linkedRoomCount: number;
@@ -171,11 +171,21 @@ export function LinkView({
     <div className="stack">
       {msg ? <div className="note">{msg}</div> : null}
 
-      {status.workspaceIdMismatch ? (
+      {/*
+        예전에는 "환경변수가 이 화면과 다른 워크스페이스를 가리킨다" 는 경고를 띄우고, 고칠
+        값으로 **보고 있는 사람의 워크스페이스 ID** 를 그대로 내밀었다. 그 안내를 그대로 따른
+        결과 봇 수집이 통째로 빈 워크스페이스로 넘어갔다(2026-08-13). 화면이 스스로를 정답으로
+        제시하면, 잘못된 화면을 보고 있는 사람일수록 확신을 갖고 설정을 망가뜨린다.
+
+        지금은 환경변수가 앵커고 콘솔이 거기에 맞춘다(auth/server.ts). 그래서 "불일치" 라는
+        상태 자체가 없다. 남은 실패는 앵커가 아예 없는 경우뿐이고, 그때만 알린다.
+      */}
+      {!status.workspaceIdConfigured ? (
         <div className="note bad">
-          배포 환경변수 KAKAO_WORKSPACE_ID 가 다른 워크스페이스를 가리킵니다. 봇이 보낸 메시지는
-          서버에 정상 도착하지만 이 화면이 보는 곳이 아닌 다른 워크스페이스에 쌓입니다. 아래 값으로
-          고치고 재배포하세요: <code>{status.expectedWorkspaceId}</code>
+          배포 환경변수 <code>KAKAO_WORKSPACE_ID</code> 가 비어 있습니다. 워크스페이스가 둘 이상이면
+          봇 인입이 거부되고(<code>503</code>) 수집이 멈춥니다. 아래 값을 넣고 재배포하세요:{' '}
+          <code>{status.currentWorkspaceId}</code> — 지금 보고 있는 이 화면의 워크스페이스이니,
+          여기가 운영 콘솔이 맞는지 확인하고 넣으세요.
         </div>
       ) : null}
 
@@ -240,11 +250,7 @@ export function LinkView({
         <StatusLine
           ok={status.workspaceIdConfigured}
           label="KAKAO_WORKSPACE_ID 설정"
-          hint={
-            status.workspaceIdMismatch
-              ? '이 화면과 다른 워크스페이스를 가리키고 있습니다 — 봇이 올린 것이 여기 안 뜹니다'
-              : '봇이 보낸 메시지를 어느 워크스페이스에 쌓을지'
-          }
+          hint="봇이 보낸 메시지를 쌓을 워크스페이스. 콘솔도 이 값이 가리키는 곳만 봅니다"
         />
         <StatusLine
           ok={status.linkedRoomCount > 0}

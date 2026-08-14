@@ -162,8 +162,7 @@ export function PreviewConsole() {
               status={{
                 ingestTokenConfigured: false,
                 workspaceIdConfigured: false,
-                workspaceIdMismatch: false,
-                expectedWorkspaceId: '00000000-0000-0000-0000-000000000000',
+                currentWorkspaceId: '00000000-0000-0000-0000-000000000000',
                 appUrl: typeof window === 'undefined' ? '' : window.location.origin,
                 linkedRoomCount,
                 roomCount: PREVIEW_ROOMS.length,

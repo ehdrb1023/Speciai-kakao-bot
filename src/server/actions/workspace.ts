@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createSupabaseServerClient, getSession } from '@/lib/auth/server';
+import { getServerClient } from '@/lib/db';
 import { isStaffSpeaker } from '@/server/kakao/rules';
 import { logAudit } from '../audit';
 
@@ -18,10 +19,38 @@ import { logAudit } from '../audit';
  */
 const DEFAULT_WORKSPACE_NAME = '사내 워크스페이스';
 
+/**
+ * 두 번째 워크스페이스는 만들지 않는다.
+ *
+ * 이 화면의 버튼 하나가 사내 데이터를 둘로 쪼갠다. 새 계정이 여기서 만들기를 누르면 자기
+ * 소유의 빈 워크스페이스가 생기고, 봇이 쌓는 곳과 사람이 보는 곳이 갈라진다(2026-08-13).
+ * 초대장 유무로 걸러봐야 승인제로 바꾼 뒤로는 대기자에게 초대장이 없어 그대로 통과한다.
+ *
+ * 그래서 조건을 사람이 아니라 **DB 상태**로 둔다 — 이미 워크스페이스가 있으면 아무도 못
+ * 만든다. 새 사람은 만드는 게 아니라 관리자 승인으로 기존 워크스페이스에 붙는다
+ * (`members.ts` 의 `grantAccess`). 최초 1회 부트스트랩만 열어둔다.
+ *
+ * service-role 로 세는 이유: 아직 아무 워크스페이스의 멤버가 아닌 계정이라 RLS 로는
+ * 남의 워크스페이스가 0개로 보인다. 그 눈으로 판단하면 매번 새로 만들게 된다.
+ */
+async function workspaceAlreadyExists(): Promise<boolean> {
+  if (process.env.KAKAO_WORKSPACE_ID?.trim()) return true;
+  const { count, error } = await getServerClient()
+    .from('workspaces')
+    .select('id', { count: 'exact', head: true });
+  // 세지 못했으면 만들지 않는다 — fail-closed. 여기서 열어주면 되돌릴 수 없는 분열이 생긴다.
+  if (error) return true;
+  return (count ?? 0) > 0;
+}
+
 export async function createWorkspace() {
   const cookieStore = await cookies();
   const session = await getSession(cookieStore);
   if (!session) return { error: '로그인이 필요합니다' };
+
+  if (await workspaceAlreadyExists()) {
+    return { error: '사내 워크스페이스는 이미 있습니다. 관리자 승인을 기다려 주세요.' };
+  }
 
   const sb = createSupabaseServerClient(cookieStore);
 

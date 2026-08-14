@@ -227,17 +227,14 @@ export default async function Page() {
             status={{
               // 토큰 실제 값은 클라이언트로 내리지 않는다. 설정 여부만 전달.
               ingestTokenConfigured: !!process.env.KAKAO_INGEST_TOKEN,
-              // 값이 있는지가 아니라 **지금 보고 있는 이 워크스페이스를 가리키는지**를 본다.
-              // 값만 확인하던 시절, 지워진 워크스페이스의 ID 가 남아 있는데도 "완료" 로 떠서
-              // 봇이 올린 것이 전부 유령 워크스페이스로 갔다(2026-08-12). 화면이 거짓말을 하면
-              // 원인을 엉뚱한 데서 찾게 된다 — 그게 제일 비싼 실패다.
-              workspaceIdConfigured:
-                !process.env.KAKAO_WORKSPACE_ID ||
-                process.env.KAKAO_WORKSPACE_ID.trim() === session.workspaceId,
-              workspaceIdMismatch:
-                !!process.env.KAKAO_WORKSPACE_ID &&
-                process.env.KAKAO_WORKSPACE_ID.trim() !== session.workspaceId,
-              expectedWorkspaceId: session.workspaceId,
+              // 값이 있으면 그것이 곧 이 화면의 워크스페이스다 — 세션이 앵커를 따라가므로
+              // (auth/server.ts) 불일치 상태가 존재할 수 없다. 값이 실재하지 않는
+              // 워크스페이스를 가리키면 아무도 멤버가 아니게 되어 콘솔이 아예 안 열린다.
+              // 조용히 "완료" 로 뜨면서 유령 워크스페이스에 쌓이던 예전 실패(2026-08-12)와
+              // 화면이 제 ID 를 정답으로 내밀어 설정을 망가뜨린 실패(2026-08-13) 둘 다
+              // 여기서 사라진다.
+              workspaceIdConfigured: !!process.env.KAKAO_WORKSPACE_ID?.trim(),
+              currentWorkspaceId: session.workspaceId,
               appUrl: process.env.NEXT_PUBLIC_APP_URL ?? '',
               linkedRoomCount,
               roomCount: rooms.length,
