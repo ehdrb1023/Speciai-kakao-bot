@@ -884,7 +884,11 @@ function renderMessages(messages: InboxMessage[], staffLabel: string) {
                   {/* 사진은 그 자리에서 보여주고, 그 외 첨부(PDF·DOCX…)는 링크로 준다.
                       파일을 <img> 로 그리면 깨진 이미지 아이콘만 남아 "안 왔다" 로 읽힌다. */}
                   {m.attachment.type === 'image' ? (
-                    <img src={m.attachment.url} alt={m.attachment.name} />
+                    // 말풍선 안에서는 미리보기(최대 260px)만 보여주고 원본은 새 탭에서 연다.
+                    // 발주서 사진은 줄여 놓으면 글자가 안 읽혀서 여는 길이 반드시 있어야 한다.
+                    <a href={m.attachment.url} target="_blank" rel="noreferrer" title={m.attachment.name}>
+                      <img src={m.attachment.url} alt={m.attachment.name} />
+                    </a>
                   ) : (
                     <a
                       className="att-file"

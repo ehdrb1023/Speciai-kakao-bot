@@ -916,10 +916,17 @@ body:has(.tss) {
   box-shadow: 0 1px 1.5px rgba(23, 35, 48, 0.06);
   word-break: break-word;
 }
+/* 사진은 말풍선 안에서 "미리보기" 크기로 묶는다. 상한이 없으면 세로로 긴 사진 한 장이
+   대화창을 통째로 밀어내 앞뒤 맥락이 안 보인다(2026-08-20). 원본은 클릭해서 새 탭에서 본다. */
 .tss .msg .bub img {
   max-width: 100%;
+  max-height: 260px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
   border-radius: 10px;
   display: block;
+  cursor: zoom-in;
 }
 .tss .msg .bub img + span {
   display: block;
