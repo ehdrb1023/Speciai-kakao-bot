@@ -131,6 +131,27 @@ var NOTI_DEBUG = true;
  */
 var NOTI_INGEST = true;
 
+/**
+ * ⚠️ API2(Event.MESSAGE)로 **수집하지 않는다**(2026-08-20). 이 단말에서 API2 가 주는
+ *    발신자·첨부가 거짓이라는 것이 실측으로 확인됐다.
+ *
+ * 실측(2026-08-20 16:34, 행정114 방):
+ *   · 이은영이 쓴 글인데 chat.author.name 이 **조사랑**(폰 주인)으로 왔다.
+ *     → 대시보드에서 대표가 쓴 말로 표시됐다. 거래처 대화 기록으로서 치명적이다.
+ *   · 첨부가 없는 텍스트 메시지인데 extractImage(chat, …)가 **프로필 사진**을 줬다.
+ *     (같은 시각 알림은 last.uri=없음 · 앞선첨부=0 — 진짜 첨부는 없었다)
+ *   · chatId 로 만든 방 열쇠 `chat:475692986962464` 가 알림 열쇠
+ *     `name:방#475692986962464` 와 갈라져 **같은 방이 대시보드에 둘로** 떴다.
+ *     번호는 같은데 서버가 접두어까지 포함해 비교하기 때문이다.
+ *
+ * 같은 시각 알림 경로는 title="이은영" 으로 정확히 맞췄다. 그래서 알림 하나로 통일한다.
+ * API2 는 계속 켜두되 역할이 둘뿐이다 — (1) 발신(chat.reply) 통로 확보,
+ * (2) _api2Fired 로 구 API 중복 수집 차단.
+ *
+ * 되돌리려면 이 한 줄을 true 로. 다만 되돌리기 전에 위 세 가지가 고쳐졌는지 먼저 확인할 것.
+ */
+var API2_INGEST = false;
+
 // 구 API 콜백이 알림 훅에 양보하는 시간. 알림 훅은 방 이름을 제대로 붙이고 구 API 는 못 붙인다.
 var RESPONSE_YIELD_MS = 600;
 var SEND_MIN_GAP_MS = 4000;    // 연속 발신 최소 간격. 기계적 연타는 자동화로 탐지된다
@@ -1645,39 +1666,38 @@ function extractNotiImage(ex) {
  *   발신자는 android.messages 안에만 넣는다. title 을 발신자로 쓰면 _notiBySender 가
  *   방 이름을 키로 잡아 구 API 쪽 조회(_lookupNotiRoom(sender))가 100% 빗나간다.
  *   방 제목이 알림에 멀쩡히 실려 와도 "방제목 복원 실패" 가 되고 #등록 부터 안 먹는다.
+ *
+ * ⚠️ 2026-08-20: 배열을 **뒤에서부터 훑던 것**을 마지막 한 건만 보도록 바꿨다.
+ *   훑으면 마지막 메시지에 발신자가 없을 때 그 앞 메시지(=다른 사람)의 이름을 집어 온다.
+ *   notiTextOf·notiTimeOf 도 각자 훑고 있었으므로, 본문은 A 것이고 이름은 B 것인
+ *   **조립된 가짜 메시지**가 나올 수 있었다. 셋 다 lastNotiMessage 한 곳에서 읽는다.
+ *   마지막 건에 발신자가 없으면 빈 값을 돌려주고, 부르는 쪽이 android.title 로 넘어간다
+ *   (이 단말에서 title 이 곧 발신자명이다 — 실측 [NOTI-CAND] title="이은영").
  */
 function notiSenderOf(ex) {
+  var b = lastNotiMessage(ex, null);
+  if (b === null) return '';
   try {
-    var arr = ex.get('android.messages');
-    if (arr === null || arr === undefined) return '';
-    for (var i = arr.length - 1; i >= 0; i--) {
-      var b = arr[i];
-      if (!b || !b.get) continue;
-      var p = b.get('sender_person');  // API 28+ 은 Person 객체로 온다
-      if (p !== null && p !== undefined) {
-        try {
-          var nm = p.getName();
-          if (nm !== null && nm !== undefined && String(nm)) return String(nm);
-        } catch (eP) {}
-      }
-      var s = b.get('sender');         // 구형은 CharSequence
-      if (s !== null && s !== undefined && String(s)) return String(s);
+    var p = b.get('sender_person');  // API 28+ 은 Person 객체로 온다
+    if (p !== null && p !== undefined) {
+      try {
+        var nm = p.getName();
+        if (nm !== null && nm !== undefined && String(nm)) return String(nm);
+      } catch (eP) {}
     }
+    var s = b.get('sender');         // 구형은 CharSequence
+    if (s !== null && s !== undefined && String(s)) return String(s);
   } catch (e) {}
   return '';
 }
 
 /** MessagingStyle 마지막 메시지 본문. bigText 보다 정확하다(발신자명이 섞이지 않는다). */
 function notiTextOf(ex) {
+  var b = lastNotiMessage(ex, null);
+  if (b === null) return '';
   try {
-    var arr = ex.get('android.messages');
-    if (arr === null || arr === undefined) return '';
-    for (var i = arr.length - 1; i >= 0; i--) {
-      var b = arr[i];
-      if (!b || !b.get) continue;
-      var t = b.get('text');
-      if (t !== null && t !== undefined && String(t)) return String(t);
-    }
+    var t = b.get('text');
+    if (t !== null && t !== undefined && String(t)) return String(t);
   } catch (e) {}
   return '';
 }
@@ -1690,17 +1710,13 @@ function notiTextOf(ex) {
  * 같은 말이 두 번 저장된다. 메시지 자신의 시각을 쓰면 몇 번을 다시 받아도 같은 키가 된다.
  */
 function notiTimeOf(ex) {
+  var b = lastNotiMessage(ex, null);
+  if (b === null) return 0;
   try {
-    var arr = ex.get('android.messages');
-    if (arr === null || arr === undefined) return 0;
-    for (var i = arr.length - 1; i >= 0; i--) {
-      var b = arr[i];
-      if (!b || !b.get) continue;
-      var t = b.get('time');
-      if (t === null || t === undefined) continue;
-      var ms = parseFloat(String(t));  // java.lang.Long → 숫자
-      if (ms > 0) return ms;
-    }
+    var t = b.get('time');
+    if (t === null || t === undefined) return 0;
+    var ms = parseFloat(String(t));  // java.lang.Long → 숫자
+    if (ms > 0) return ms;
   } catch (e) {}
   return 0;
 }
@@ -2013,7 +2029,8 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-14b DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+Log.i('kakao-bot: 시작 v2026-08-20a DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST
+  + ' API2_INGEST=' + API2_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
 
 readCachedRules();
 refreshRules(true);
@@ -2031,6 +2048,41 @@ try {
       _bot.on(Event.MESSAGE, function (chat) {
         try {
           _api2Fired = true;
+
+          // ★ 수집을 끈 경우: **답장 통로만** 잡고 나간다. author·image 는 읽지 않는다.
+          //
+          //   통로는 방 이름을 열쇠로 걸리는데, 서버가 내려보내는 이름은 규칙 패턴
+          //   "방#<번호>" 이고 API2 의 chat.room.name 은 진짜 제목("행정114")이라 안 맞는다.
+          //   그렇다고 _lookupNotiRoom(발신자명) 으로 교정하면 안 된다 — 그 발신자명이 바로
+          //   틀린 값이라, 틀린 이름으로 찾으면 **다른 방의 답장 통로**가 이 방 열쇠에 걸린다
+          //   (대시보드 글이 엉뚱한 방으로 나간다).
+          //
+          //   대신 chatId 로 직접 만든다. 알림 열쇠(notiRoomKeyOf)와 API2 의 chatId 는
+          //   같은 카톡 채팅방 ID 다 — 실측으로 확인했다(알림 "방#475692986962464",
+          //   API2 chatId "475692986962464"). 발신자명을 거치지 않으니 틀릴 여지가 없다.
+          if (!API2_INGEST) {
+            try {
+              var rmQ = chat.room, rnameQ = '', chIdQ = null;
+              if (rmQ !== null && rmQ !== undefined) {
+                if (typeof rmQ === 'string') rnameQ = String(rmQ);
+                else {
+                  if (rmQ.name) rnameQ = String(rmQ.name);
+                  if (rmQ.chatId !== undefined && rmQ.chatId !== null) chIdQ = String(rmQ.chatId);
+                }
+              }
+              if (!chIdQ && chat.channelId !== undefined && chat.channelId !== null) chIdQ = String(chat.channelId);
+              if (!chIdQ && chat.chatId !== undefined && chat.chatId !== null) chIdQ = String(chat.chatId);
+
+              var replyQ = null;
+              try { if (chat && chat.reply) replyQ = function (t) { return chat.reply(t); }; } catch (eRq) {}
+              // 서버가 부를 이름(규칙 패턴)과 메신저봇R 이 아는 이름을 둘 다 걸어둔다.
+              if (chIdQ) rememberReplier(ROOM_ID_PREFIX + chIdQ, rnameQ, replyQ);
+              if (rnameQ) rememberReplier(rnameQ, rnameQ, replyQ);
+            } catch (eQ) {
+              Log.e('kakao-bot[API2] 답장 통로 확보 실패: ' + eQ);
+            }
+            return;
+          }
 
           // chat.room 은 단말/버전에 따라 객체(.name/.chatId)일 수도, 문자열일 수도 있다.
           var rname = '';
