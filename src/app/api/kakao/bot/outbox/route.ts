@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { ackOutbound, claimOutbound, resolveBotWorkspace } from '@/server/kakao';
+import { ackOutbound, claimOutbound, resolveBotWorkspace, touchBotHeartbeat } from '@/server/kakao';
 import { getServerClient } from '@/lib/db';
 import { ingestTokenValid } from '@/server/kakao/ingest-token';
 import { logAuditMachine } from '@/server/audit';
@@ -32,6 +32,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: ws.reason ?? '워크스페이스를 정할 수 없습니다' }, { status: 503 });
   }
   const workspaceId = ws.workspaceId;
+
+  // 봇이 살아 있다는 유일한 정기 신호다. 이 폴링은 보낼 것이 없어도 1분마다 오므로
+  // 여기 찍은 시각이 곧 "앱이 돌고 있는가" 의 답이 된다(콘솔 봇 단말 카드).
+  await touchBotHeartbeat(sb, workspaceId, 'outbox');
 
   const acks = (body?.acks ?? [])
     .filter((a): a is { id: string; ok?: boolean; error?: string } => typeof a?.id === 'string')

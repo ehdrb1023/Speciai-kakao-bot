@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { createSupabaseServerClient, getSession } from '@/lib/auth/server';
-import { listUnmatchedRooms } from '@/server/kakao';
+import { listUnmatchedRooms, loadBotHeartbeat } from '@/server/kakao';
 import { listPartners } from '@/server/actions/partners';
 
 // 거래처 탭 폴링용.
@@ -22,9 +22,12 @@ export async function GET() {
   }
 
   const sb = createSupabaseServerClient(await cookies());
-  const [partners, unmatched] = await Promise.all([
+  // 봇 심장박동도 같이 싣는다. 서버 렌더 시각으로 굳어 있으면 탭을 켜둔 채 30분만 지나도
+  // 멀쩡한 봇이 "끊김" 으로 뜬다 — 거짓 경보는 경보가 없느니만 못하다.
+  const [partners, unmatched, botHeartbeat] = await Promise.all([
     listPartners(),
     listUnmatchedRooms(sb, session.workspaceId),
+    loadBotHeartbeat(sb, session.workspaceId),
   ]);
 
   return NextResponse.json(
@@ -36,6 +39,9 @@ export async function GET() {
         hitCount: u.hitCount,
         lastSeenAt: u.lastSeenAt,
       })),
+      bot: botHeartbeat
+        ? { lastSeenAt: botHeartbeat.lastSeenAt, lastGapMs: botHeartbeat.lastGapMs }
+        : null,
     },
     // 폴링이라 캐시가 붙으면 갱신이 안 되는 것과 같아진다.
     { headers: { 'Cache-Control': 'no-store' } },

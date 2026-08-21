@@ -168,6 +168,9 @@ export function PreviewConsole() {
                 roomCount: PREVIEW_ROOMS.length,
                 messageCount,
                 lastIngestAt: PREVIEW_ROOMS[0]?.lastMessageAt ?? null,
+                // 목업이라 "방금 두드린 봇" 으로 둔다. 이 화면은 배치·문구 확인용이다.
+                botLastSeenAt: PREVIEW_ROOMS[0]?.lastMessageAt ?? null,
+                botLastGapMs: 62_000,
               }}
             />
           ),

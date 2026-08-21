@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useTabActive } from '../tab-active';
 import type { PartnerRow } from '@/server/actions/partners';
 import { matchRoomRule, normalizeRoomName, type RoomRule, type RoomRuleKind } from '@/server/kakao/rules';
+import { botLivenessOf, type BotLiveness } from '@/server/kakao/heartbeat';
 import { seoulFull, seoulMonthDayTime } from '@/lib/time';
 
 export interface UnmatchedRoom {
@@ -33,7 +34,13 @@ export interface LinkStatus {
   linkedRoomCount: number;
   roomCount: number;
   messageCount: number;
+  /** 연결된 방의 최근 메시지 시각. **봇 생존과 다른 값이다** — 봇이 살아 있어도 규칙에
+   *  안 걸리면 안 움직인다. 그래서 아래 봇 심장박동과 화면에서 분리해 보여준다. */
   lastIngestAt: string | null;
+  /** 봇이 마지막으로 서버를 두드린 시각. 앱이 돌고 있는가의 답이다. */
+  botLastSeenAt: string | null;
+  /** 직전 두드림과의 간격(ms). 벌어져 있으면 재워진 것(Doze), 끊기면 죽은 것이다. */
+  botLastGapMs: number | null;
 }
 
 const KIND_LABELS: Record<RoomRuleKind, string> = {
@@ -70,6 +77,13 @@ export function LinkView({
   useEffect(() => {
     setLive({ partners, unmatched });
   }, [partners, unmatched]);
+
+  // 봇 심장박동은 폴링으로 갱신한다. 서버 렌더 값에 머물면 탭을 켜둔 채 30분 지났을 때
+  // 멀쩡한 봇이 "끊김" 으로 뜬다 — 그 거짓 경보가 이 기능의 신뢰를 통째로 깎는다.
+  const [bot, setBot] = useState({ lastSeenAt: status.botLastSeenAt, lastGapMs: status.botLastGapMs });
+  useEffect(() => {
+    setBot({ lastSeenAt: status.botLastSeenAt, lastGapMs: status.botLastGapMs });
+  }, [status.botLastSeenAt, status.botLastGapMs]);
 
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -108,8 +122,14 @@ export function LinkView({
       try {
         const res = await fetch('/api/kakao/partners', { cache: 'no-store' });
         if (!res.ok || stopped) return;
-        const json = (await res.json()) as { partners?: PartnerRow[]; unmatched?: UnmatchedRoom[] };
+        const json = (await res.json()) as {
+          partners?: PartnerRow[];
+          unmatched?: UnmatchedRoom[];
+          bot?: { lastSeenAt: string; lastGapMs: number | null } | null;
+        };
         if (!json.partners || stopped) return;
+        // 목록이 그대로여도(아래 지문 비교로 빠져나가도) 심장박동은 반드시 갱신한다.
+        setBot({ lastSeenAt: json.bot?.lastSeenAt ?? null, lastGapMs: json.bot?.lastGapMs ?? null });
         const next = { partners: json.partners, unmatched: json.unmatched ?? [] };
         const cur = liveRef.current;
         const fp = (v: typeof next) =>
@@ -242,10 +262,11 @@ export function LinkView({
             <div className="desc">규칙을 받지 못한 상태에서는 어느 방으로도 보내지 않습니다.</div>
           </div>
           <span className="tag" style={{ flexShrink: 0 }}>
-            수집 {status.roomCount}방 · 메시지 {status.messageCount}건 · 마지막{' '}
+            수집 {status.roomCount}방 · 메시지 {status.messageCount}건 · 마지막 수집{' '}
             {status.lastIngestAt ? seoulFull(status.lastIngestAt) : '없음'}
           </span>
         </div>
+        <BotHeartbeatLine lastSeenAt={bot.lastSeenAt} lastGapMs={bot.lastGapMs} />
         <StatusLine ok={status.ingestTokenConfigured} label="KAKAO_INGEST_TOKEN 설정" hint="봇과 서버가 공유하는 머신 토큰" />
         <StatusLine
           ok={status.workspaceIdConfigured}
@@ -471,6 +492,78 @@ function UnmatchedRow({
       </div>
     </div>
   );
+}
+
+/**
+ * 봇 단말 생존 표시.
+ *
+ * 이 줄이 필요한 이유: 바로 위 "마지막 수집" 은 봇 생존이 아니라 **연결된 방의 최근 메시지**
+ * 시각이다. 봇이 멀쩡해도 규칙에 안 걸리면 며칠 전에 멈춰 있고, 그걸 보고 "봇이 죽었다" 로
+ * 읽으면 엉뚱한 곳(폰)을 뒤지게 된다. 실제로 그렇게 하루를 썼다(2026-08-17).
+ *
+ * 그래서 두 줄을 분리한다 — 위는 "수집이 되고 있나", 아래는 "폰을 보러 가야 하나".
+ */
+function BotHeartbeatLine({ lastSeenAt, lastGapMs }: { lastSeenAt: string | null; lastGapMs: number | null }) {
+  // 서버 렌더 시각으로 굳으면 탭을 켜둔 동안 "40초 전" 이 몇 시간째 그대로 뜬다.
+  // 그 화면을 믿고 "봇 살아 있네" 로 읽는 것이 이 기능이 막으려던 바로 그 실패다.
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    setNow(Date.now());
+    const t = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 첫 렌더는 서버와 같은 값이어야 한다(hydration). 시각 계산은 마운트 후부터.
+  const liveness: BotLiveness = now === null ? 'unknown' : botLivenessOf(lastSeenAt, new Date(now));
+  const silentMs = now !== null && lastSeenAt ? Math.max(0, now - new Date(lastSeenAt).getTime()) : null;
+
+  const label: Record<BotLiveness, string> = {
+    unknown: '확인 중',
+    ok: '정상',
+    delayed: '지연',
+    down: '끊김',
+  };
+  const color: Record<BotLiveness, string> = {
+    unknown: 'var(--g400)',
+    ok: 'var(--green, #16a34a)',
+    delayed: 'var(--amber)',
+    down: 'var(--red, #dc2626)',
+  };
+  const hint: Record<BotLiveness, string> = {
+    unknown: lastSeenAt ? '' : '봇이 아직 이 서버를 두드린 적이 없습니다',
+    ok: '메신저봇R 이 돌고 있습니다',
+    delayed: '앱은 살아 있으나 응답이 늦습니다 — 절전(Doze)에 들어갔을 수 있습니다. 카톡이 오면 폰이 깨어나 수집은 대개 계속됩니다',
+    down: '앱이 멈췄거나 폰이 재부팅됐습니다 — 단말에서 메신저봇R 을 확인하세요',
+  };
+
+  return (
+    <div className="card-b" style={{ paddingTop: 14, paddingBottom: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ color: color[liveness], fontWeight: 700 }}>● {label[liveness]}</span>
+        <span style={{ fontSize: 14, color: 'var(--g600)' }}>
+          {silentMs !== null ? `${humanAgo(silentMs)} 연결됨` : '연결 기록 없음'}
+          {lastGapMs !== null ? ` · 직전 간격 ${Math.round(lastGapMs / 1000)}초` : ''}
+        </span>
+      </div>
+      {hint[liveness] ? (
+        <div className="tiny" style={{ marginTop: 4, color: 'var(--g500)' }}>
+          {hint[liveness]}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** "3분 전" · "2시간 12분 전". 초 단위는 안 보여준다 — 30초마다 갱신하므로 정확하지 않다. */
+function humanAgo(ms: number): string {
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return '방금';
+  if (min < 60) return `${min}분 전`;
+  const h = Math.floor(min / 60);
+  const rest = min % 60;
+  if (h < 24) return rest ? `${h}시간 ${rest}분 전` : `${h}시간 전`;
+  const d = Math.floor(h / 24);
+  return `${d}일 ${h % 24}시간 전`;
 }
 
 function StatusLine({ ok, label, hint }: { ok: boolean; label: string; hint: string }) {

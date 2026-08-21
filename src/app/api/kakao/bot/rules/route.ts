@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { getServerClient } from '@/lib/db';
-import { loadRules, resolveBotWorkspace, sortRules } from '@/server/kakao';
+import { loadRules, resolveBotWorkspace, sortRules, touchBotHeartbeat } from '@/server/kakao';
 import { ingestTokenValid } from '@/server/kakao/ingest-token';
 
 // 봇 단말이 내려받는 방 필터 규칙.
@@ -27,6 +27,8 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: ws.reason ?? '워크스페이스를 정할 수 없습니다' }, { status: 503 });
   }
   const workspaceId = ws.workspaceId;
+
+  await touchBotHeartbeat(sb, workspaceId, 'rules');
 
   const rules = sortRules(await loadRules(sb, workspaceId)).map((r) => ({
     kind: r.kind,

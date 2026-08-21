@@ -5,7 +5,13 @@ import { getSession, createSupabaseServerClient } from '@/lib/auth/server';
 import { canManageMembers } from '@/lib/auth';
 import { BRAND } from '@/lib/brand';
 import { MembersPanel, type MemberRow, type InvitationRow } from '@/lib/ui';
-import { listRooms, listRoomMessages, listRoomOutbound, listUnmatchedRooms } from '@/server/kakao';
+import {
+  listRooms,
+  listRoomMessages,
+  listRoomOutbound,
+  listUnmatchedRooms,
+  loadBotHeartbeat,
+} from '@/server/kakao';
 import { ConsoleShell, type HeroDef, type ViewKey } from '@/components/console/ConsoleShell';
 import { InboxView, type InboxViewData } from '@/components/console/views/InboxView';
 import {
@@ -55,12 +61,22 @@ export default async function Page() {
   const canEdit = canManageMembers(session.role);
 
   // 서로 의존성 없는 항목을 단일 Promise.all 로 병렬 로드.
-  const [{ data: ws }, rooms, unmatched, partners, messageCountRes, memberRes, inviteRes] =
+  const [
+    { data: ws },
+    rooms,
+    unmatched,
+    partners,
+    botHeartbeat,
+    messageCountRes,
+    memberRes,
+    inviteRes,
+  ] =
     await Promise.all([
       sb.from('workspaces').select('name, staff_aliases').eq('id', workspaceId).single(),
       listRooms(sb, workspaceId),
       listUnmatchedRooms(sb, workspaceId),
       listPartners(),
+      loadBotHeartbeat(sb, workspaceId),
       sb
         .from('kakao_messages')
         .select('id', { count: 'exact', head: true })
@@ -240,6 +256,8 @@ export default async function Page() {
               roomCount: rooms.length,
               messageCount,
               lastIngestAt: rooms[0]?.lastMessageAt ?? null,
+              botLastSeenAt: botHeartbeat?.lastSeenAt ?? null,
+              botLastGapMs: botHeartbeat?.lastGapMs ?? null,
             }}
           />
         ),

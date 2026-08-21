@@ -11,6 +11,7 @@ import {
   recordUnmatchedRoom,
   resolveBotWorkspace,
   roomKeyOf,
+  touchBotHeartbeat,
   unbindRoom,
 } from '@/server/kakao';
 import { logAuditMachine } from '@/server/audit';
@@ -75,6 +76,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: ws.reason ?? '워크스페이스를 정할 수 없습니다' }, { status: 503 });
   }
   const workspaceId = ws.workspaceId;
+
+  // 메시지가 올라왔다는 것은 앱이 돌고 **알림도 받고 있다**는 뜻이다. outbox 폴링만으로도
+  // 생존은 알 수 있지만, 그것만 오고 이건 안 오는 상태가 곧 "켜져 있는데 수집이 안 된다" 다.
+  await touchBotHeartbeat(sb, workspaceId, 'ingest');
 
   // 방 등록/해제 명령은 메시지가 아니다. 매칭·저장 어느 쪽도 타지 않고 여기서 끝난다.
   const command = parseRoomCommand(body.text ?? '');
