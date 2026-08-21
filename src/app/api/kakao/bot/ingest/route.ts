@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getServerClient } from '@/lib/db';
 import {
+  autoLinkRoomByName,
   bindRoomToPartner,
   claimOutbound,
   ingestBotMessage,
@@ -32,6 +33,10 @@ import { ingestTokenValid } from '@/server/kakao/ingest-token';
 //            그 경우 본문에 "[파일] 이름" 만 남는다. 무엇이 왔는지는 알아야 하기 때문이다.
 // 출력: { ok, inserted, skipped, unmatched? }
 //   unmatched=true 는 규칙 미매칭. 봇이 그 방을 로컬 차단 목록에 넣는 신호로도 쓴다.
+//
+// 자동 연결: 규칙에 없는 방이어도 방 이름에 "[거래처명]" 이 박혀 있으면 그 자리에서
+//   exact 규칙을 만들고 이 메시지부터 수집한다(autoLinkRoomByName). 응답에 registered=true 를
+//   실어 봇이 규칙을 즉시 다시 받아가게 한다. 거래처는 대시보드에 미리 있어야 한다.
 //
 // 방 등록 명령: text 가 "#등록 <거래처명>" · "#등록해제" 면 메시지가 아니라 명령으로 처리한다.
 //   저장하지 않고 exact 규칙을 만들거나 지운다. 응답의 registered/unregistered 를 보고
@@ -88,10 +93,30 @@ export async function POST(req: Request) {
   }
 
   // 매칭을 먼저 본다 — 미매칭 방의 사진이 버킷에 남으면 안 되기 때문.
-  const matched = await matchRoomForWorkspace(sb, workspaceId, body.room);
+  let matched = await matchRoomForWorkspace(sb, workspaceId, body.room);
+
+  // 규칙에 없더라도, 방 이름에 대괄호로 거래처명이 박혀 있으면 그 자리에서 붙인다.
+  // ("[스페시아이] 발주" → 대시보드의 스페시아이). 사람이 그 방에 들어가 #등록 을
+  // 칠 필요가 없어진다. 규칙을 만드는 것이지 예외를 만드는 것이 아니다 — 여기서 만든
+  // 규칙은 #등록 이 만드는 것과 같은 행이라 다음 메시지부터는 위 매칭에서 걸린다.
+  let autoLinked = false;
+  if (!matched) {
+    matched = await autoLinkRoomByName(sb, workspaceId, body.room);
+    autoLinked = !!matched;
+  }
+
   if (!matched) {
     await recordUnmatchedRoom(sb, workspaceId, roomKeyOf(body.chatId, body.room), body.room.trim());
     return NextResponse.json({ ok: true, inserted: 0, skipped: 0, unmatched: true });
+  }
+
+  if (autoLinked) {
+    await logAuditMachine({
+      action: 'kakao.bot.ingest',
+      targetTable: 'partner_room_rules',
+      targetId: matched.partnerId,
+      meta: { room: body.room, sender: body.sender, command: 'auto-bind', partner: matched.partnerName },
+    });
   }
 
   // 사진은 이미 JPEG 로 재압축돼 오고, 파일은 원본 그대로 온다. 저장 경로는 같다.
@@ -146,6 +171,9 @@ export async function POST(req: Request) {
     ok: true,
     inserted: result.inserted,
     skipped: result.skipped,
+    // 방금 자동으로 붙은 방이면 봇에게 알린다. 봇은 이 값을 보고 규칙을 즉시 다시 받아간다
+    // (안 하면 최대 10분간 단말 선필터가 이 방을 모르는 방으로 알아 사진을 안 올린다).
+    ...(autoLinked ? { registered: true, partner: matched.partnerName } : {}),
     outbox,
   });
 }

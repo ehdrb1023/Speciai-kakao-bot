@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  findPartnerInRoomName,
   isStaffSpeaker,
   matchRoomRule,
   normalizeRoomName,
@@ -94,5 +95,64 @@ describe('isStaffSpeaker', () => {
 
   it('별칭이 없으면 전부 거래처측', () => {
     expect(isStaffSpeaker('신동규', [])).toBe(false);
+  });
+});
+
+describe('findPartnerInRoomName — 방 이름에 박힌 거래처 자동 연결', () => {
+  const partners = [
+    { id: 'p1', name: '스페시아이' },
+    { id: 'p2', name: '삼성전자' },
+  ];
+
+  it('대괄호 안에 거래처명이 있으면 찾는다', () => {
+    expect(findPartnerInRoomName('[스페시아이] 발주', partners)?.id).toBe('p1');
+    expect(findPartnerInRoomName('발주 [삼성전자]', partners)?.id).toBe('p2');
+    expect(findPartnerInRoomName('[스페시아이]발주', partners)?.id).toBe('p1');
+  });
+
+  it('대괄호 안이 거래처명과 정확히 같아야 붙는다', () => {
+    // "스페시아이" 가 "[스페시아이테크]" 방을 가져가면 두 거래처 대화가 한 곳에 섞인다.
+    expect(findPartnerInRoomName('[스페시아이테크] 발주', partners)).toBeNull();
+    expect(findPartnerInRoomName('[스페시아이 2공장] 자재', partners)).toBeNull();
+    expect(findPartnerInRoomName('[스페시아이-품질]', partners)).toBeNull();
+  });
+
+  it('그 이름의 거래처가 따로 등록돼 있으면 거기로 붙는다', () => {
+    const both = [...partners, { id: 'p3', name: '스페시아이테크' }];
+    expect(findPartnerInRoomName('[스페시아이테크] 발주', both)?.id).toBe('p3');
+    expect(findPartnerInRoomName('[스페시아이] 발주', both)?.id).toBe('p1');
+  });
+
+  it('대괄호 밖의 이름은 잡지 않는다 — 개인 방을 빨아들이지 않기 위함', () => {
+    expect(findPartnerInRoomName('삼성전자 동호회', partners)).toBeNull();
+    expect(findPartnerInRoomName('스페시아이 회식방', partners)).toBeNull();
+  });
+
+  it('대괄호가 여럿이어도 한 거래처만 걸리면 붙는다', () => {
+    expect(findPartnerInRoomName('[발주] [스페시아이] 3월', partners)?.id).toBe('p1');
+  });
+
+
+
+  it('봇이 지어낸 열쇠 이름에는 적용하지 않는다', () => {
+    expect(findPartnerInRoomName('방#476647316580151', [{ id: 'p3', name: '방' }])).toBeNull();
+  });
+
+  it('서로 다른 거래처가 걸리면 아무것도 고르지 않는다', () => {
+    const two = [
+      { id: 'p1', name: '가나다라' },
+      { id: 'p2', name: '마바사아' },
+    ];
+    expect(findPartnerInRoomName('[가나다라] [마바사아] 공동', two)).toBeNull();
+  });
+
+  it('대괄호가 없거나 거래처가 없으면 null', () => {
+    expect(findPartnerInRoomName('그냥 방 이름', partners)).toBeNull();
+    expect(findPartnerInRoomName('[없는회사] 발주', partners)).toBeNull();
+    expect(findPartnerInRoomName('[스페시아이] 발주', [])).toBeNull();
+  });
+
+  it('전각 대괄호도 읽는다 — 카톡 방 제목에 섞여 들어온다', () => {
+    expect(findPartnerInRoomName('【스페시아이】 발주', partners)?.id).toBe('p1');
   });
 });

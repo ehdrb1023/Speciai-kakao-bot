@@ -1,6 +1,15 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { isGeneratedRoomName, isStaffSpeaker, matchRoomRule, normalizeRoomName, type RoomRule } from './rules';
+import {
+  BIND_RULE_PRIORITY,
+  bracketedTokens,
+  findPartnerInRoomName,
+  isGeneratedRoomName,
+  isStaffSpeaker,
+  matchRoomRule,
+  normalizeRoomName,
+  type RoomRule,
+} from './rules';
 import { escapeLikePattern } from './commands';
 
 export * from './rules';
@@ -177,6 +186,72 @@ export async function matchRoomForWorkspace(
 ): Promise<RoomRule | null> {
   const rules = await loadRules(sb, workspaceId);
   return matchRoomRule(roomName, rules);
+}
+
+/**
+ * 방 이름에 대괄호로 박힌 거래처를 찾아 그 자리에서 연결한다. 못 찾으면 null.
+ *
+ * "대시보드에 [스페시아이] 를 만들어 뒀으면, 방 이름에 [스페시아이] 가 들어 있는 방은
+ * 첫 메시지에 알아서 붙는다"(2026-08-18 대표 지시). 예전에는 사람이 그 방에 들어가
+ * `#등록 스페시아이` 를 쳐야 했다 — 방이 32개면 32번, 그리고 봇 폰 주인이 직접 치면
+ * 자기 발화는 알림에 안 떠서 먹지도 않았다.
+ *
+ * 만드는 것은 `#등록` 과 **완전히 같은 exact 규칙 1건**이다. 별도 종류를 만들지 않는 이유:
+ * 그래야 봇 규칙 배포·발신 시 방 이름 조회(`claimOutbound` 가 `matched_rule_id` 로 패턴을
+ * 읽는다)·콘솔의 연결 해제가 전부 기존 경로를 그대로 탄다. 매칭 경로가 둘로 갈라지지 않는다.
+ * 붙고 나면 `#등록해제` 로 똑같이 끊을 수 있다.
+ *
+ * 거래처를 여기서 **만들지는 않는다**. 만드는 곳은 대시보드 한 곳이라는 원칙은 그대로다 —
+ * 방 이름의 대괄호 안 오타로 거래처가 생기면 그 방 대화가 조용히 엉뚱한 곳에 쌓인다.
+ */
+export async function autoLinkRoomByName(
+  sb: SupabaseClient,
+  workspaceId: string,
+  roomName: string,
+): Promise<RoomRule | null> {
+  const room = normalizeRoomName(roomName);
+  // 봇이 방 제목을 못 얻어 지어낸 이름(`방#<열쇠>`)에는 거래처명이 있을 수 없다.
+  if (!room || isGeneratedRoomName(room)) return null;
+  // 대괄호가 없으면 볼 것도 없다. 여기서 끊는 이유는 비용이다 — 선필터를 꺼둔 탓에
+  // 이 폰의 개인 카톡이 전부 이 경로를 지나가는데, 그때마다 거래처를 조회할 이유가 없다.
+  if (bracketedTokens(room).length === 0) return null;
+
+  const { data, error } = await sb
+    .from('partners')
+    .select('id, name')
+    .eq('workspace_id', workspaceId);
+  if (error) {
+    console.error('[kakao] 자동 연결용 거래처 조회 실패', error.message);
+    return null;
+  }
+
+  const hit = findPartnerInRoomName(
+    room,
+    (data ?? []).map((p) => ({ id: p.id as string, name: p.name as string })),
+  );
+  if (!hit) return null;
+
+  // createOnly — 이미 붙어 있는 방은 건드리지 않는다. 여기까지 왔다는 것은 활성 규칙에
+  // 안 걸렸다는 뜻이지만, 꺼져 있는 규칙이 남아 있을 수 있다. 그것도 사람의 의사표시다.
+  const bound = await bindRoomToPartner(sb, workspaceId, room, hit.name, { createOnly: true });
+  // 규칙을 못 만들었으면 매칭됐다고 답하지 않는다. 여기서 억지로 통과시키면 규칙 없이
+  // 저장된 방이 생기고, 다음 메시지부터는 다시 미분류로 떨어져 대화가 끊겨 남는다.
+  if (!bound.ok || !bound.ruleId || !bound.partnerId) {
+    // ruleExists 는 실패가 아니다 — 사람이 만든 연결을 지킨 정상 동작이다.
+    if (!bound.ruleExists) {
+      console.error('[kakao] 자동 연결 실패', { room, partner: hit.name, error: bound.error });
+    }
+    return null;
+  }
+
+  return {
+    id: bound.ruleId,
+    partnerId: bound.partnerId,
+    kind: 'exact',
+    pattern: room,
+    priority: BIND_RULE_PRIORITY,
+    partnerName: bound.partnerName ?? hit.name,
+  };
 }
 
 export interface BotMessageResult {
@@ -402,8 +477,12 @@ export interface RoomBindResult {
   ok: boolean;
   /** 대시보드에 없는 회사명. 오타이거나 아직 거래처를 안 만든 것이다. */
   partnerMissing?: boolean;
+  /** createOnly 인데 이 방 이름의 규칙이 이미 있었다. 사람이 만든 연결을 지킨 것이다. */
+  ruleExists?: boolean;
   partnerId?: string;
   partnerName?: string;
+  /** 만들었거나 되살린 exact 규칙 id. 자동 연결이 이걸 그대로 매칭 결과로 쓴다. */
+  ruleId?: string;
   /** 다른 거래처에 붙어 있던 방을 옮겨왔으면 이전 거래처명 */
   rebindedFrom?: string;
   error?: string;
@@ -421,6 +500,17 @@ export async function bindRoomToPartner(
   workspaceId: string,
   roomName: string,
   partnerName: string,
+  options?: {
+    /**
+     * 이 방 이름의 규칙이 이미 있으면 손대지 않고 물러난다.
+     *
+     * 자동 판정(방 제목의 `[거래처명]`)이 쓰는 값이다. 사람이 `#등록`·콘솔로 만들어 둔
+     * 연결은 자동 판정보다 항상 우선한다 — 방 제목과 거래처명이 다르게 굳어진 방들이
+     * 이미 돌아가고 있고(대괄호 없이 쓰던 방들), 그것들이 이름 하나 때문에 조용히
+     * 다른 거래처로 옮겨가면 그 뒤 대화가 통째로 엉뚱한 곳에 쌓인다.
+     */
+    createOnly?: boolean;
+  },
 ): Promise<RoomBindResult> {
   const pattern = normalizeRoomName(roomName);
   const name = normalizeRoomName(partnerName);
@@ -447,8 +537,11 @@ export async function bindRoomToPartner(
     .ilike('pattern', escapeLikePattern(pattern))
     .maybeSingle();
 
+  if (existing && options?.createOnly) return { ok: false, ruleExists: true };
+
   const now = new Date().toISOString();
   let rebindedFrom: string | undefined;
+  let ruleId: string | undefined;
 
   if (existing) {
     const rel = Array.isArray(existing.partners) ? existing.partners[0] : existing.partners;
@@ -460,17 +553,23 @@ export async function bindRoomToPartner(
       .update({ partner_id: partnerId, enabled: true, updated_at: now })
       .eq('id', existing.id as string);
     if (error) return { ok: false, error: error.message };
+    ruleId = existing.id as string;
   } else {
-    const { error } = await sb.from('partner_room_rules').insert({
-      workspace_id: workspaceId,
-      partner_id: partnerId,
-      kind: 'exact',
-      pattern,
-      // 방에서 직접 지정한 것이 예전에 남아 있는 접두어 규칙보다 구체적인 의사표시다.
-      priority: 100,
-      enabled: true,
-    });
+    const { data: created, error } = await sb
+      .from('partner_room_rules')
+      .insert({
+        workspace_id: workspaceId,
+        partner_id: partnerId,
+        kind: 'exact',
+        pattern,
+        // 방에서 직접 지정한 것이 예전에 남아 있는 접두어 규칙보다 구체적인 의사표시다.
+        priority: BIND_RULE_PRIORITY,
+        enabled: true,
+      })
+      .select('id')
+      .maybeSingle();
     if (error) return { ok: false, error: error.message };
+    ruleId = created?.id as string | undefined;
   }
 
   // 등록 전까지 미분류로 쌓인 흔적 정리. 실패해도 등록 자체는 성립하므로 막지 않는다.
@@ -481,7 +580,7 @@ export async function bindRoomToPartner(
     .eq('room_key', roomKeyOf(null, pattern));
   if (delErr) console.error('[kakao] 미분류 방 정리 실패', delErr.message);
 
-  return { ok: true, partnerId, partnerName: partnerLabel, rebindedFrom };
+  return { ok: true, partnerId, partnerName: partnerLabel, ruleId, rebindedFrom };
 }
 
 export interface RoomUnbindResult {

@@ -106,3 +106,88 @@ export function isStaffSpeaker(speaker: string, aliases: string[]): boolean {
   }
   return false;
 }
+
+/**
+ * `#등록`·자동 연결이 만드는 exact 규칙의 우선순위.
+ * 패턴 방식이던 시절의 접두어 규칙보다 먼저 걸려야 한다 — 방에서 한 번 선언한 것이,
+ * 또는 거래처명이 방 이름에 박혀 있는 것이, 예전 접두어보다 구체적인 의사표시다.
+ */
+export const BIND_RULE_PRIORITY = 100;
+
+/** 방 이름 안에서 거래처를 찾을 때 필요한 최소 정보. */
+export interface PartnerNameRef {
+  id: string;
+  name: string;
+}
+
+/**
+ * 방 이름 안의 대괄호 토큰. "[스페시아이] 발주" → ["스페시아이"]
+ *
+ * 대괄호만 보는 이유: 맨 이름으로 부분일치를 하면 "삼성" 이라는 거래처 하나가
+ * "삼성동 동창회" 같은 개인 단톡방을 통째로 빨아들인다. 거래처 방 제목에 대괄호로
+ * 회사명을 박는 것은 사람이 의도적으로 한 표시라, 우연히 걸릴 여지가 없다.
+ */
+const BRACKET_TOKEN_RE = /[[［【]([^\]］】]+)[\]］】]/g;
+
+export function bracketedTokens(roomName: string): string[] {
+  const room = normalizeRoomName(roomName);
+  const out: string[] = [];
+  BRACKET_TOKEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = BRACKET_TOKEN_RE.exec(room)) !== null) {
+    const token = normalizeRoomName(m[1] ?? '');
+    if (token) out.push(token);
+  }
+  return out;
+}
+
+/**
+ * 대괄호 안이 거래처명과 **정확히 같을 때만** 인정한다(대소문자만 무시).
+ *
+ * 앞부분만 같아도 인정하던 때가 있었는데, 그러면 "스페시아이" 하나가 "[스페시아이테크]"
+ * 방까지 가져간다(2026-08-18 대표 지적). 이웃한 두 거래처의 대화가 한 곳에 섞이면
+ * 사람이 눈치채기까지 오래 걸리고, 그동안 쌓인 것을 나중에 갈라낼 방법이 없다.
+ * 완전일치만 인정하면 "스페시아이테크" 는 그 이름의 거래처를 만들어야 붙는다 —
+ * 안 붙는 것은 미분류 목록에 떠서 바로 보이지만, 잘못 붙은 것은 안 보인다.
+ */
+function tokenNamesPartner(token: string, partnerName: string): boolean {
+  return token.toLowerCase() === partnerName.toLowerCase();
+}
+
+/**
+ * 방 이름에 대괄호로 박힌 거래처. 없으면 null.
+ *
+ * 여기서 찾히면 서버가 그 자리에서 `#등록` 과 똑같은 exact 규칙을 만든다 — 사람이 방에
+ * 들어가 명령을 칠 필요가 없다. 그래서 판정은 보수적으로 한다:
+ *   · 대괄호 안에서만 찾는다(위 BRACKET_TOKEN_RE 주석 참고)
+ *   · 대괄호 안이 거래처명과 **정확히 같아야** 한다(tokenNamesPartner)
+ *   · 서로 다른 거래처가 걸리면 **아무것도 고르지 않는다**. 둘 중 하나를 찍는 것보다
+ *     미분류로 남겨 사람 눈에 띄게 하는 편이 낫다 — 한 번 잘못 붙으면 그 방 대화가
+ *     계속 엉뚱한 거래처에 쌓인다.
+ *
+ * 이 판정에 걸리지 않는다고 수집이 막히는 것은 아니다. 대괄호 없이 쓰던 기존 방들은
+ * 이미 `exact` 규칙으로 붙어 있고 그 규칙이 먼저 매칭된다. 여기는 **아직 아무 규칙에도
+ * 안 걸린 방**에만 닿는 마지막 갈래다.
+ */
+export function findPartnerInRoomName(
+  roomName: string,
+  partners: PartnerNameRef[],
+): PartnerNameRef | null {
+  if (isGeneratedRoomName(roomName)) return null;
+  const tokens = bracketedTokens(roomName);
+  if (tokens.length === 0) return null;
+
+  let best: PartnerNameRef | null = null;
+
+  for (const partner of partners) {
+    const name = normalizeRoomName(partner.name);
+    if (!name) continue;
+    if (!tokens.some((t) => tokenNamesPartner(t, name))) continue;
+    // 대괄호가 둘 이상인 방("[가나다] [마바사] 공동")에서 서로 다른 거래처가 걸리는 경우다.
+    // 어느 쪽 방인지 사람만 안다. 찍지 않고 미분류로 남긴다.
+    if (best && best.id !== partner.id) return null;
+    best = { id: partner.id, name };
+  }
+
+  return best;
+}

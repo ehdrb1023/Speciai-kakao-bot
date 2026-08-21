@@ -27,7 +27,7 @@ function roomLabel(roomName: string, partnerName?: string): string {
 }
 
 export interface PartnersActions {
-  createPartner: (input: { name: string }) => Promise<{ error?: string }>;
+  createPartner: (input: { name: string }) => Promise<{ error?: string; linkedRooms?: number }>;
   deletePartner: (id: string) => Promise<{ error?: string }>;
   linkRoom: (input: { partnerId: string; roomName: string }) => Promise<{ error?: string }>;
   unlinkRoom: (ruleId: string) => Promise<{ error?: string }>;
@@ -96,10 +96,19 @@ export function PartnersView({
   const pendingRef = useRef(pending);
   pendingRef.current = pending;
 
-  function run(fn: () => Promise<{ error?: string }>, okMsg: string) {
+  // 거래처를 만든 직후 문구. 이미 와 있던 방이 붙었으면 그 사실을 숨기지 않는다 —
+  // 화면이 "이제 #등록 하세요" 라고만 말하면 이미 끝난 일을 또 시키는 셈이다.
+  function createdMsg(res: { linkedRooms?: number }) {
+    if (res.linkedRooms && res.linkedRooms > 0) {
+      return `거래처를 추가하고, 이름이 들어 있던 방 ${res.linkedRooms}개를 바로 붙였어요.`;
+    }
+    return '거래처를 추가했어요. 방 제목의 대괄호 안이 이 이름과 같으면 다음 메시지부터 저절로 붙습니다.';
+  }
+
+  function run<R extends { error?: string }>(fn: () => Promise<R>, okMsg: string | ((res: R) => string)) {
     start(async () => {
       const res = await fn();
-      setMsg(res.error ? `실패: ${res.error}` : okMsg);
+      setMsg(res.error ? `실패: ${res.error}` : typeof okMsg === 'function' ? okMsg(res) : okMsg);
     });
   }
 
@@ -196,7 +205,9 @@ export function PartnersView({
           <div className="card-h">
             <div>
               <h2>거래처 추가</h2>
-              <div className="desc">회사명만 등록합니다. 방 연결은 그 카톡방에서 #등록 회사명 으로 만듭니다.</div>
+              <div className="desc">
+                회사명만 등록합니다. 카톡 방 제목의 대괄호 안이 이 이름과 같으면 저절로 붙습니다.
+              </div>
             </div>
           </div>
           <div className="card-b">
@@ -212,7 +223,7 @@ export function PartnersView({
                       const res = await actions.createPartner({ name: newName });
                       if (!res.error) setNewName('');
                       return res;
-                    }, '거래처를 추가했어요. 이제 그 카톡방에서 #등록 으로 붙이세요.');
+                    }, createdMsg);
                   }
                 }}
                 placeholder="회사명 (예: 삼성전자)"
@@ -227,18 +238,25 @@ export function PartnersView({
                     const res = await actions.createPartner({ name: newName });
                     if (!res.error) setNewName('');
                     return res;
-                  }, '거래처를 추가했어요. 이제 그 카톡방에서 #등록 으로 붙이세요.')
+                  }, createdMsg)
                 }
               >
                 추가
               </button>
             </div>
             <div className="note" style={{ marginBottom: 0 }}>
-              ① 여기에 회사명 등록 → ② 그 카톡방에서 <b>#등록 회사명</b> (등록한 이름 그대로) → ③ 그때부터 수집.
-              끊을 때는 <b>#등록해제</b>. 명령 결과는 몇 초 안에 이 화면에 저절로 반영됩니다.
+              ① 여기에 회사명 등록 → ② 카톡 방 제목의 <b>대괄호 안이 이 이름과 정확히 같으면</b>
+              그 방의 다음 메시지부터 저절로 붙어 수집됩니다. 이미 와 있던 방은 등록하는 즉시 붙습니다.
               <br />
-              봇이 설치된 폰의 주인이 직접 치면 안 됩니다 — 자기 발화는 알림에 뜨지 않아 봇이 못 봅니다.
-              방의 다른 사람이 쳐야 합니다.
+              <b>[스페시아이] 발주</b> → 붙습니다. <b>[스페시아이테크] 발주</b>·<b>[스페시아이 발주]</b> →
+              안 붙습니다. 대괄호 안이 한 글자라도 다르면 다른 회사로 봅니다 — 이웃한 두 거래처의
+              대화가 한 곳에 섞이면 나중에 갈라낼 방법이 없기 때문입니다.
+              <br />
+              그런 방은 그 카톡방에서 <b>#등록 회사명</b> 을 치면 붙습니다(등록한 이름 그대로).
+              끊을 때는 <b>#등록해제</b>. <b>이미 붙어 있는 방은 자동 판정이 건드리지 않습니다.</b>
+              <br />
+              #등록 을 봇이 설치된 폰의 주인이 직접 치면 안 됩니다 — 자기 발화는 알림에 뜨지 않아
+              봇이 못 봅니다. 방의 다른 사람이 쳐야 합니다.
             </div>
           </div>
         </div>

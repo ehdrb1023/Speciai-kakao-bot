@@ -4,16 +4,23 @@ import { cookies } from 'next/headers';
 import { revalidatePath } from 'next/cache';
 import { createSupabaseServerClient, getSession } from '@/lib/auth/server';
 import { canManageMembers } from '@/lib/auth';
-import { normalizeRoomName, type RoomRuleKind } from '@/server/kakao/rules';
+import {
+  BIND_RULE_PRIORITY,
+  findPartnerInRoomName,
+  normalizeRoomName,
+  type RoomRuleKind,
+} from '@/server/kakao/rules';
 import { escapeLikePattern } from '@/server/kakao/commands';
 import { logAudit } from '../audit';
 
 // 거래처 CRUD. 대시보드 "거래처" 탭이 쓴다.
 //
-// 대시보드는 회사명만 관리한다. 방↔거래처 연결은 카톡방에서 "#등록 <회사명>" 으로 만든다.
-// 여기서 방 이름 패턴을 편집하지 않는 이유: 패턴을 사람이 손으로 맞추게 하면 대괄호 하나
-// 빠뜨린 규칙이 섞이고, 그 방은 아무 소리 없이 수집되지 않는다. 방에서 한 번 선언하는
-// 쪽이 틀릴 여지가 적다.
+// 대시보드는 회사명만 관리한다. 방↔거래처 연결은 사람이 패턴을 손으로 적어 만들지 않는다 —
+// 대괄호 하나 빠뜨린 규칙이 섞이면 그 방은 아무 소리 없이 수집되지 않기 때문이다.
+// 연결이 생기는 길은 셋이고, 셋 다 결국 같은 exact 규칙 1건을 만든다:
+//   1) 자동 — 방 이름에 "[회사명]" 이 박혀 있으면 첫 메시지에 서버가 붙인다(autoLinkRoomByName)
+//   2) 카톡방에서 "#등록 <회사명>"
+//   3) 콘솔에서 미분류 방을 골라 붙이기(linkRoom·adoptUnmatchedRoom)
 
 export interface PartnerRow {
   id: string;
@@ -117,11 +124,15 @@ export async function listPartners(): Promise<PartnerRow[]> {
 /**
  * 거래처 등록 — 회사명만 받는다.
  *
- * 방은 여기서 붙이지 않는다. 이 이름을 카톡방에서 "#등록 <회사명>" 으로 치면 그때 붙는다.
+ * 방 이름 패턴은 여기서 만들지 않는다. 이 이름이 방 제목에 "[회사명]" 으로 박혀 있으면
+ * 그 방의 다음 메시지에 서버가 알아서 붙이고(autoLinkRoomByName), 이미 미분류로 쌓여
+ * 있던 방은 등록 즉시 여기서 붙인다(linkPendingRoomsFor).
  */
 export async function createPartner(input: { name: string }): Promise<{
   error?: string;
   partnerId?: string;
+  /** 이 이름이 박혀 있어 그 자리에서 붙인 미분류 방 수 */
+  linkedRooms?: number;
 }> {
   const session = await getSession(await cookies());
   if (!session?.workspaceId) return { error: '워크스페이스가 없습니다' };
@@ -142,9 +153,88 @@ export async function createPartner(input: { name: string }): Promise<{
   }
 
   const partnerId = data.id as string;
-  await logAudit({ action: 'partner.create', targetTable: 'partners', targetId: partnerId });
+
+  // 이 회사명이 박힌 방이 이미 미분류로 쌓여 있으면 그 자리에서 붙인다. 거래처를 만들기
+  // 전에 온 메시지들이 그 방을 목록에 올려두었을 텐데, 사람에게 "그 방에서 다시 한마디
+  // 오기를 기다리세요" 라고 할 이유가 없다. 판정은 인입 경로와 **같은 함수**를 쓴다.
+  const linkedRooms = await linkPendingRoomsFor(sb, session.workspaceId, partnerId, name);
+
+  await logAudit({
+    action: 'partner.create',
+    targetTable: 'partners',
+    targetId: partnerId,
+    meta: linkedRooms > 0 ? { autoLinkedRooms: linkedRooms } : undefined,
+  });
   revalidatePath('/');
-  return { partnerId };
+  return { partnerId, linkedRooms };
+}
+
+/**
+ * 새로 만든 거래처의 이름이 박힌 미분류 방들을 붙인다. 붙인 방 수를 돌려준다.
+ *
+ * 실패해도 거래처 등록 자체는 성립하므로 막지 않는다 — 못 붙은 방은 다음 메시지가 올 때
+ * 인입 경로(autoLinkRoomByName)가 같은 판정으로 다시 붙인다.
+ */
+async function linkPendingRoomsFor(
+  sb: ReturnType<typeof createSupabaseServerClient>,
+  workspaceId: string,
+  partnerId: string,
+  partnerName: string,
+): Promise<number> {
+  const { data: pending, error } = await sb
+    .from('kakao_unmatched_rooms')
+    .select('id, room_name')
+    .eq('workspace_id', workspaceId)
+    .is('dismissed_at', null);
+  if (error) {
+    console.error('[partners] 미분류 방 조회 실패', error.message);
+    return 0;
+  }
+
+  const targets = (pending ?? []).filter(
+    (r) => !!findPartnerInRoomName(r.room_name as string, [{ id: partnerId, name: partnerName }]),
+  );
+  if (targets.length === 0) return 0;
+
+  let linked = 0;
+  for (const row of targets) {
+    const pattern = normalizeRoomName(row.room_name as string);
+
+    // 이미 이 방 이름의 규칙이 있으면 **건드리지 않는다.** 자동 판정이 사람이 만들어 둔
+    // 연결을 옮기면, 그 방의 그 뒤 대화가 통째로 다른 거래처에 쌓인다. 이름이 같다는
+    // 이유만으로 옮길 만큼 확실한 근거가 아니다. 옮기려면 콘솔에서 사람이 옮긴다.
+    const { data: existing } = await sb
+      .from('partner_room_rules')
+      .select('id')
+      .eq('workspace_id', workspaceId)
+      .eq('kind', 'exact')
+      .ilike('pattern', escapeLikePattern(pattern))
+      .maybeSingle();
+    if (existing) continue;
+
+    const { error: linkErr } = await sb.from('partner_room_rules').insert({
+      workspace_id: workspaceId,
+      partner_id: partnerId,
+      kind: 'exact',
+      pattern,
+      priority: BIND_RULE_PRIORITY,
+      enabled: true,
+    });
+
+    if (linkErr) {
+      console.error('[partners] 미분류 방 자동 연결 실패', pattern, linkErr.message);
+      continue;
+    }
+
+    linked += 1;
+    await sb
+      .from('kakao_unmatched_rooms')
+      .delete()
+      .eq('id', row.id as string)
+      .eq('workspace_id', workspaceId);
+  }
+
+  return linked;
 }
 
 export async function updatePartner(input: {
@@ -241,7 +331,7 @@ export async function linkRoom(input: {
         partner_id: input.partnerId,
         kind: 'exact',
         pattern,
-        priority: 100,
+        priority: BIND_RULE_PRIORITY,
         enabled: true,
       });
 

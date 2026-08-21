@@ -7,7 +7,14 @@
 import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useTabActive } from '../tab-active';
 import type { PartnerRow } from '@/server/actions/partners';
-import { matchRoomRule, normalizeRoomName, type RoomRule, type RoomRuleKind } from '@/server/kakao/rules';
+import {
+  BIND_RULE_PRIORITY,
+  findPartnerInRoomName,
+  matchRoomRule,
+  normalizeRoomName,
+  type RoomRule,
+  type RoomRuleKind,
+} from '@/server/kakao/rules';
 import { botLivenessOf, type BotLiveness } from '@/server/kakao/heartbeat';
 import { seoulFull, seoulMonthDayTime } from '@/lib/time';
 
@@ -49,10 +56,6 @@ const KIND_LABELS: Record<RoomRuleKind, string> = {
   contains: '포함',
   regex: '정규식',
 };
-
-// #등록 이 만드는 규칙의 우선순위. 서버(bindRoomToPartner)와 같은 값이다 — 남아 있는
-// 접두어 규칙보다 먼저 걸리게 한다.
-const BIND_PRIORITY = 100;
 
 // 미분류 방 폴링 주기. 이 화면의 사건(#등록·새 미분류 방)도 브라우저 밖에서 일어난다.
 const POLL_MS = 10_000;
@@ -347,7 +350,7 @@ function MatchTester({ partners }: { partners: PartnerRow[] }) {
           partnerId: p.id,
           kind: 'exact',
           pattern: r.roomName,
-          priority: BIND_PRIORITY,
+          priority: BIND_RULE_PRIORITY,
           partnerName: p.name,
         });
       }
@@ -366,13 +369,19 @@ function MatchTester({ partners }: { partners: PartnerRow[] }) {
   }, [partners]);
 
   const hit = name.trim() ? matchRoomRule(name, rules) : null;
+  // 규칙에 없어도 방 제목에 [거래처명] 이 박혀 있으면 서버가 첫 메시지에 붙인다.
+  // 인입 경로와 같은 함수로 판정해야 이 화면이 거짓말을 하지 않는다.
+  const auto =
+    !hit && name.trim()
+      ? findPartnerInRoomName(name, partners.map((p) => ({ id: p.id, name: p.name })))
+      : null;
 
   return (
     <div className="card">
       <div className="card-h">
         <div>
           <h2>매칭 확인</h2>
-          <div className="desc">방 이름을 넣으면 어떤 규칙에 걸리는지 보여줍니다.</div>
+          <div className="desc">방 이름을 넣으면 어떤 거래처에 붙는지 보여줍니다.</div>
         </div>
       </div>
       <div className="test">
@@ -413,11 +422,28 @@ function MatchTester({ partners }: { partners: PartnerRow[] }) {
                   <span className="rv">{hit.partnerName ?? '—'}</span>
                 </div>
               </>
+            ) : auto ? (
+              <>
+                <div className="rline">
+                  <span className="rk">결과</span>
+                  <span className="rv">
+                    <span className="tag point">자동 연결</span>
+                  </span>
+                </div>
+                <div className="rline">
+                  <span className="rk">연결될 거래처</span>
+                  <span className="rv">{auto.name}</span>
+                </div>
+                <div className="rline">
+                  <span className="rk">언제</span>
+                  <span className="rv">이 방에서 다음 메시지가 오는 즉시</span>
+                </div>
+              </>
             ) : (
               <div className="rline">
                 <span className="rk">결과</span>
                 <span className="rv" style={{ color: 'var(--amber)' }}>
-                  어느 규칙에도 걸리지 않음 — 이 이름의 방은 저장되지 않습니다
+                  걸리는 규칙도, 방 제목 안의 거래처명도 없음 — 이 이름의 방은 저장되지 않습니다
                 </span>
               </div>
             )}
