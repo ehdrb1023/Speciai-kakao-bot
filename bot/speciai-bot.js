@@ -821,9 +821,121 @@ function outboxPost(acks) {
 //   2) RemoteInput — 카톡 알림에 실린 "답장" 액션. API2 도 replier 도 없을 때의 마지막 수단
 // 둘 다 카톡 알림 세션을 물고 있어 방이 오래 조용하면 만료된다. 만료는 발신 실패로 보고되고
 // 대시보드에 failed 로 뜬다 — 조용히 사라지는 것보다 낫다.
-var REPLY_TTL_MS = 30 * 60 * 1000;
-var _replierByRoom = {};   // 교정된 방 제목 → { fn, raw, at }
-var _notiReplyByRoom = {}; // 교정된 방 제목 → { action, inputs, at }
+//
+// ⚠️ 재컴파일이 통로를 전멸시키던 문제 (2026-08-21)
+//
+//   스크립트 스코프 변수에 담아두면 메신저봇R 이 스크립트를 다시 컴파일할 때마다 통로가
+//   통째로 비워졌다. 그 뒤로는 **그 방에서 카톡이 한 번 더 와야** 다시 보낼 수 있다.
+//   조용한 방(마지막 수신이 며칠 전인 방)에 대시보드에서 글을 쓰면 3회 만에 failed 로
+//   죽었다 — 실측 2026-08-21, 율암 방.
+//
+//   그런데 재컴파일이 버리는 것은 **스크립트 스코프뿐이고 프로세스는 살아 있다.**
+//   (근거: 봇을 꺼도 이미 뜬 자바 데몬 스레드가 계속 돌았다 — stopOutboxLoops 주석의
+//    2026-08-12 실측. 그래서 세대 번호를 System 속성에 걸어 옛 루프를 끊고 있다.)
+//   그러니 통로를 프로세스 전역(System.getProperties() 는 Hashtable 이다)에 얹어두면
+//   재컴파일 너머로 넘어간다.
+//
+//   넘어가는 것은 RemoteInput 쪽뿐이다. replier 는 Rhino 함수라 죽은 스코프에 묶여 있어
+//   못 넘긴다 — 그래서 _replierByRoom 은 지금처럼 스코프 변수로 둔다.
+//   **앱 강제종료·폰 재부팅은 못 넘는다.** PendingIntent 는 프로세스 토큰이라 원리상 불가다.
+var _replierByRoom = {};   // 교정된 방 제목 → { fn, raw, at } — 재컴파일에 못 산다(Rhino 함수)
+
+/** 프로세스 전역에 통로를 걸어두는 자리. 세대 번호(OUTBOX_GEN_PROP)와 같은 수법이다. */
+var NOTI_REPLY_PROP = 'sq.kakao.notiReply';
+
+/**
+ * 통로를 몇 개까지 들고 있을 것인가.
+ *
+ * DEVICE_FILTER=false 라 이 단말에 오는 **모든 방**(개인 카톡 포함)의 알림이 여기를 지난다.
+ * 컴파일마다 비워지던 때는 저절로 정리됐지만, 이제 프로세스가 사는 한 계속 쌓인다.
+ * 각 칸이 PendingIntent 와 Bundle 을 붙들고 있으므로 상한을 둔다.
+ */
+var NOTI_REPLY_MAX = 200;
+
+// System 속성에 못 얹는 단말을 위한 폴백. 이쪽으로 내려가면 예전과 같은 동작이 된다
+// (재컴파일에 통로를 잃는다). 통로가 아예 없는 것보다는 낫다.
+var _notiReplyFallback = null;
+
+/**
+ * 통로 저장소(방 이름 → 통로). 프로세스 전역 Map 이라 재컴파일 너머로 남는다.
+ *
+ * 값을 자바 Map 으로 쌓는 이유: JS 객체로 담으면 그것이 곧 죽은 스코프에 묶인 Rhino 객체라
+ * 재컴파일 뒤에 읽는 순간 무엇이 나올지 보장이 없다. 자바 객체만 담는다.
+ * ConcurrentHashMap 인 이유: 알림 콜백은 아무 스레드로나 온다.
+ */
+function notiReplyStore() {
+  try {
+    var props = java.lang.System.getProperties();
+    var m = props.get(NOTI_REPLY_PROP);
+    if (m === null || m === undefined) {
+      m = new java.util.concurrent.ConcurrentHashMap();
+      props.put(NOTI_REPLY_PROP, m);
+    }
+    return m;
+  } catch (e) {
+    if (_notiReplyFallback === null) {
+      Log.e('kakao-bot[발신] 전역 통로 저장 불가 — 이 세대에서만 유지된다: ' + e);
+      try {
+        _notiReplyFallback = new java.util.concurrent.ConcurrentHashMap();
+      } catch (e2) {
+        return null;
+      }
+    }
+    return _notiReplyFallback;
+  }
+}
+
+/**
+ * 지금 통로가 잡혀 있는 방 중 **규칙에 걸리는 것**만 추린다.
+ *
+ * 규칙 밖(개인 카톡)까지 세면 목록이 수십 개가 되어 정작 봐야 할 거래처 방이 묻힌다.
+ * 어차피 sendToRoom 이 규칙 밖 방은 거부하므로, 발신 가능 여부와 상관 있는 것은 이쪽뿐이다.
+ */
+function allowedReplyRooms() {
+  var out = [];
+  var store = notiReplyStore();
+  if (store === null) return out;
+  try {
+    var it = store.keySet().iterator();
+    while (it.hasNext()) {
+      var k = String(it.next());
+      if (isAllowedRoom(k)) out.push(k);
+    }
+  } catch (e) {}
+  return out;
+}
+
+/**
+ * 통로 명세를 로그에 남긴다. **개수가 변했을 때만** 찍는다 —
+ * 매 폴링마다 찍으면 로그가 이것으로 도배돼 정작 오류 줄이 묻힌다.
+ */
+var _lastChannelCount = -1;
+function logReplyChannels(why) {
+  var rooms = allowedReplyRooms();
+  if (rooms.length === _lastChannelCount) return;
+  _lastChannelCount = rooms.length;
+  Log.i('kakao-bot[통로] ' + why + ' — 발신 가능한 방 ' + rooms.length + '개'
+    + (rooms.length ? ': ' + rooms.join(' · ') : ' (그 방에서 카톡이 한 통 와야 열린다)'));
+}
+
+/** 가장 오래된 통로부터 버린다. 상한을 넘겼을 때만 부른다. */
+function evictOldestReply(store) {
+  var oldestKey = null;
+  var oldestAt = -1;
+  try {
+    var it = store.entrySet().iterator();
+    while (it.hasNext()) {
+      var e = it.next();
+      var at = parseFloat(String(e.getValue().get('at')));
+      if (!(at > 0)) at = 0;
+      if (oldestAt < 0 || at < oldestAt) { oldestAt = at; oldestKey = e.getKey(); }
+    }
+    if (oldestKey !== null) store.remove(oldestKey);
+  } catch (e3) {
+    // 정리에 실패했다고 통로를 못 걸게 하지 않는다. 다음 기회에 다시 시도된다.
+    Log.e('kakao-bot[발신] 통로 정리 실패: ' + e3);
+  }
+}
 
 /** response·API2 콜백이 준 답장 객체를 그 방 이름으로 걸어둔다. raw 는 메신저봇R 이 아는 방 이름. */
 function rememberReplier(room, rawRoom, replyFn) {
@@ -842,7 +954,23 @@ function captureReplyAction(sbn, room) {
       var ris = null;
       try { ris = a.getRemoteInputs(); } catch (e) {}
       if (!ris || !ris.length) continue;
-      _notiReplyByRoom[normRoom(room)] = { action: a, inputs: ris, at: _now() };
+      var store = notiReplyStore();
+      if (store === null) return;
+      if (store.size() >= NOTI_REPLY_MAX && !store.containsKey(normRoom(room))) {
+        evictOldestReply(store);
+      }
+      var isNew = !store.containsKey(normRoom(room));
+      var rec = new java.util.HashMap();
+      rec.put('action', a);
+      rec.put('inputs', ris);
+      // 시각은 문자열로 담는다. 자바 숫자형으로 담으면 오버로드 해석이 단말마다 달라진다.
+      rec.put('at', String(_now()));
+      store.put(normRoom(room), rec);
+      // 새로 열린 것만 남긴다. 알림마다 찍으면 로그가 이것으로 덮인다.
+      if (isNew && isAllowedRoom(room)) {
+        Log.i('kakao-bot[통로] 열림 room="' + room + '"');
+        logReplyChannels('통로 추가');
+      }
       return;
     }
   } catch (e2) {
@@ -856,13 +984,26 @@ function captureReplyAction(sbn, room) {
  * 카톡 알림창에서 사람이 답장을 치는 것과 같은 경로다.
  */
 function sendViaNotiReply(room, text) {
-  var rec = _notiReplyByRoom[normRoom(room)];
-  if (!rec) return { ok: false, error: '알림 답장 통로 없음(그 방 알림을 아직 못 받았다)' };
+  var store = notiReplyStore();
+  var rec = (store === null) ? null : store.get(normRoom(room));
+  if (rec === null || rec === undefined) {
+    // 이 문자열은 서버로 올라가 kakao_outbound.last_error 에 남는다. 사람이 원인을 짚을 수
+    // 있을 만큼은 실어 보낸다 — "실패" 세 글자만 남으면 폰 로그를 뒤지는 수밖에 없다.
+    var have = allowedReplyRooms();
+    return {
+      ok: false,
+      error: '알림 답장 통로 없음(그 방 알림을 아직 못 받았다) — 지금 보낼 수 있는 방 '
+        + have.length + '개'
+    };
+  }
 
   // 오래됐다고 미리 포기하지 않는다. 카톡 알림 세션이 실제로 얼마나 사는지는 우리가 모른다.
   // 우리가 정한 시한으로 먼저 거절하면, 멀쩡히 나갈 수 있는 것을 못 나가게 막는 셈이다.
   // 만료됐으면 PendingIntent.send 가 실패하고, 그건 그대로 실패로 보고된다 — 그쪽이 정직하다.
-  var ageMin = Math.round((_now() - rec.at) / 60000);
+  var recAt = parseFloat(String(rec.get('at')));
+  var ageMin = (recAt > 0) ? (Math.round((_now() - recAt) / 60000) + '분 된 세션') : '시각 미상 세션';
+  var inputs = rec.get('inputs');
+  var action = rec.get('action');
 
   var ctx = appContext();
   if (ctx === null) return { ok: false, error: 'Context 없음' };
@@ -870,14 +1011,14 @@ function sendViaNotiReply(room, text) {
   try {
     var intent = new android.content.Intent();
     var bundle = new android.os.Bundle();
-    for (var i = 0; i < rec.inputs.length; i++) {
-      bundle.putCharSequence(rec.inputs[i].getResultKey(), text);
+    for (var i = 0; i < inputs.length; i++) {
+      bundle.putCharSequence(inputs[i].getResultKey(), text);
     }
-    android.app.RemoteInput.addResultsToIntent(rec.inputs, intent, bundle);
-    rec.action.actionIntent.send(ctx, 0, intent);
-    return { ok: true, via: 'noti.remoteInput(' + ageMin + '분 된 세션)' };
+    android.app.RemoteInput.addResultsToIntent(inputs, intent, bundle);
+    action.actionIntent.send(ctx, 0, intent);
+    return { ok: true, via: 'noti.remoteInput(' + ageMin + ')' };
   } catch (e) {
-    return { ok: false, error: 'RemoteInput 전송 실패(' + ageMin + '분 된 세션) ' + e };
+    return { ok: false, error: 'RemoteInput 전송 실패(' + ageMin + ') ' + e };
   }
 }
 
@@ -947,6 +1088,8 @@ function sendGap() {
 /** 밀린 것이 없어질 때까지 보내고 그때마다 결과를 보고한다. */
 function outboxDrain() {
   if (!OUTBOX_ENABLED) return;
+
+  logReplyChannels('폴링');
 
   var jobs = _pendingJobs;
   _pendingJobs = [];
@@ -2034,8 +2177,15 @@ function onNotificationPosted(sbn) {
 
 // 폰에 실제로 올라간 코드가 어느 것인지 로그 첫 줄로 못 박는다. 붙여넣기가 안 먹었는데
 // 먹은 줄 알고 원인을 엉뚱한 데서 찾은 적이 있다(2026-08-12).
-Log.i('kakao-bot: 시작 v2026-08-20a DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST
+Log.i('kakao-bot: 시작 v2026-08-21a DEVICE_FILTER=' + DEVICE_FILTER + ' NOTI_INGEST=' + NOTI_INGEST
   + ' API2_INGEST=' + API2_INGEST + ' NOTI_DEBUG=' + NOTI_DEBUG);
+
+// 재컴파일 너머로 넘어온 통로가 몇 개인지 첫 줄에 남긴다. 이 값이 0 이 아니면 이번 컴파일은
+// 통로를 잃지 않은 것이고, 계속 0 이면 전역 저장이 이 단말에서 안 먹는다는 뜻이다.
+try {
+  var _inherited = notiReplyStore();
+  Log.i('kakao-bot[발신] 통로 ' + (_inherited === null ? '저장 불가' : _inherited.size() + '개 인수'));
+} catch (eI) {}
 
 readCachedRules();
 refreshRules(true);
