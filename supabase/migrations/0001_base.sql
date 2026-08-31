@@ -88,8 +88,17 @@ language sql stable as $$
 $$;
 
 -- 가입 시 profiles 자동 생성
+--
+-- ⚠️ `set search_path` 를 빼면 안 된다. 이 트리거를 실제로 부르는 것은 GoTrue 의
+--    supabase_auth_admin 세션인데, security definer 함수는 search_path 를 **호출자에게서**
+--    물려받는다. 그 세션의 search_path 에는 public 이 없어서 `insert into profiles` 가
+--    "relation does not exist" 로 죽고, 밖에서는 계정 생성이
+--    `500 Database error creating new user` 로만 보인다 — 진짜 이유가 안 드러난다.
+--    (2026-08-31 새 프로젝트 이관 중 실측. 같은 파일의 create_workspace 는 이미 갖고 있다.)
 create or replace function handle_new_user()
-returns trigger language plpgsql security definer as $$
+returns trigger language plpgsql security definer
+set search_path = public
+as $$
 begin
   insert into profiles (id, email, display_name)
   values (
