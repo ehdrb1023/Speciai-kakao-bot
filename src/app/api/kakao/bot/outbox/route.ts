@@ -7,7 +7,9 @@ import { logAuditMachine } from '@/server/audit';
 // 봇이 "보낼 것 있나" 를 물어보는 곳. 인입과 반대 방향이다.
 //
 // 인증: X-Ingest-Token (인입·규칙 조회와 같은 토큰) → service-role 로 RLS 우회
-// 입력: { acks?: [{ id, ok, error? }] }   직전에 가져간 것들의 전송 결과
+// 입력: { acks?: [{ id, ok, error? }], rooms?: string[] }
+//       acks  직전에 가져간 것들의 전송 결과
+//       rooms 지금 답장 통로를 들고 있는 방(규칙 pattern). 화면이 "쓰기 전에" 막는 데 쓴다
 // 출력: { ok, outbox: [{ id, room, text }] }
 //
 // 결과 보고와 새 작업 수령을 한 번의 왕복으로 묶은 이유: 봇은 폰이고 네트워크가 자주 끊긴다.
@@ -23,6 +25,7 @@ export async function POST(req: Request) {
 
   const body = (await req.json().catch(() => null)) as {
     acks?: Array<{ id?: string; ok?: boolean; error?: string }>;
+    rooms?: unknown;
   } | null;
 
   const sb = getServerClient();
@@ -35,7 +38,13 @@ export async function POST(req: Request) {
 
   // 봇이 살아 있다는 유일한 정기 신호다. 이 폴링은 보낼 것이 없어도 1분마다 오므로
   // 여기 찍은 시각이 곧 "앱이 돌고 있는가" 의 답이 된다(콘솔 봇 단말 카드).
-  await touchBotHeartbeat(sb, workspaceId, 'outbox');
+  //
+  // 통로 목록도 같은 왕복에 얹는다. 목록을 안 보내는 구버전 스크립트면 undefined 가 되어
+  // 기존 값을 건드리지 않고, 화면은 그 값이 낡았음을 보고 "모른다" 로 간다.
+  const sendableRooms = Array.isArray(body?.rooms)
+    ? body.rooms.filter((v): v is string => typeof v === 'string' && v.trim() !== '').slice(0, 200)
+    : undefined;
+  await touchBotHeartbeat(sb, workspaceId, 'outbox', sendableRooms);
 
   const acks = (body?.acks ?? [])
     .filter((a): a is { id: string; ok?: boolean; error?: string } => typeof a?.id === 'string')

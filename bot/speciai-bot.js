@@ -780,7 +780,14 @@ function outboxPost(acks) {
     conn.setRequestProperty('Content-Type', 'application/json; charset=utf-8');
     conn.setRequestProperty('X-Ingest-Token', TOKEN);
 
-    var payload = JSON.stringify({ acks: acks || [] });
+    // 통로 목록을 같이 올린다. 이걸 받아야 대시보드가 "이 방은 지금 못 보낸다" 를
+    // **사람이 쓰기 전에** 말해줄 수 있다. 서버는 이 값을 kakao_bot_status 에 얹어두고,
+    // 받은 카톡 화면이 30초마다 그걸 읽어 입력창 위에 띄운다.
+    //
+    // 규칙에 걸리는 방만 센다 — 개인 카톡까지 실으면 수십 개가 되고, 어차피 sendToRoom 이
+    // 규칙 밖 방은 단말에서 거부한다. 여기 담기는 이름은 규칙 pattern 이라 서버가 그대로
+    // 맞춰볼 수 있다.
+    var payload = JSON.stringify({ acks: acks || [], rooms: allowedReplyRooms() });
     var os = conn.getOutputStream();
     os.write(new java.lang.String(payload).getBytes('UTF-8'));
     os.flush();

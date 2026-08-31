@@ -26,6 +26,7 @@ export const PREVIEW_ROOMS: InboxRoom[] = [
     lastMessageAt: ago(12 * MIN),
     preview: '내일까지 수정된 견적서 보내주실 수 있을까요?',
     messageCount: 6,
+    sendState: 'open',
   },
   {
     id: 'r2',
@@ -38,6 +39,7 @@ export const PREVIEW_ROOMS: InboxRoom[] = [
     lastMessageAt: ago(3 * HOUR),
     preview: '[사진] 도면_v3.jpg',
     messageCount: 4,
+    sendState: 'open',
   },
   {
     id: 'r3',
@@ -50,6 +52,8 @@ export const PREVIEW_ROOMS: InboxRoom[] = [
     lastMessageAt: ago(2 * DAY),
     preview: '확인했습니다. 감사합니다.',
     messageCount: 3,
+    // 이틀 조용한 방 — 봇 단말의 답장 통로가 닫혀 있는 모습을 미리보기에 그대로 남긴다.
+    sendState: 'closed',
   },
   {
     id: 'r4',
@@ -62,6 +66,7 @@ export const PREVIEW_ROOMS: InboxRoom[] = [
     lastMessageAt: ago(5 * DAY),
     preview: '다음 주에 다시 연락드릴게요',
     messageCount: 2,
+    sendState: 'open',
   },
 ];
 

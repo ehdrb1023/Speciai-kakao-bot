@@ -31,6 +31,12 @@ export interface RoomRow {
   lastMessageAt: string | null;
   preview: string;
   messageCount: number;
+  /**
+   * 이 방의 규칙 pattern — **봇이 아는 이름**이다. roomName 은 거래처명으로 갈아 끼워져
+   * 있어서 봇 쪽과 맞출 수 없다(claimOutbound 가 내려보내는 것도 이 값이다).
+   * 규칙이 지워진 방이면 null.
+   */
+  rulePattern: string | null;
 }
 
 export interface MessageRow {
@@ -624,7 +630,7 @@ export async function listRooms(sb: SupabaseClient, workspaceId: string): Promis
   const { data, error } = await sb
     .from('kakao_rooms')
     .select(
-      'id, room_key, room_name, partner_id, color, pinned_at, handled_at, last_message_at, last_preview, message_count, partners(name, color)',
+      'id, room_key, room_name, partner_id, color, pinned_at, handled_at, last_message_at, last_preview, message_count, partners(name, color), partner_room_rules(pattern)',
     )
     .eq('workspace_id', workspaceId)
     .is('deleted_at', null)
@@ -637,6 +643,7 @@ export async function listRooms(sb: SupabaseClient, workspaceId: string): Promis
 
   return (data ?? []).map((r) => {
     const partner = Array.isArray(r.partners) ? r.partners[0] : r.partners;
+    const rule = Array.isArray(r.partner_room_rules) ? r.partner_room_rules[0] : r.partner_room_rules;
     return {
       id: r.id as string,
       roomKey: r.room_key as string,
@@ -649,6 +656,7 @@ export async function listRooms(sb: SupabaseClient, workspaceId: string): Promis
       lastMessageAt: (r.last_message_at as string | null) ?? null,
       preview: (r.last_preview as string | null) ?? '',
       messageCount: (r.message_count as number) ?? 0,
+      rulePattern: (rule as { pattern: string } | null)?.pattern ?? null,
     };
   });
 }

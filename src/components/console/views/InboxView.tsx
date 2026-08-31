@@ -20,6 +20,16 @@ export interface InboxRoom {
   lastMessageAt: string | null;
   preview: string;
   messageCount: number;
+  /**
+   * 지금 이 방으로 글이 나갈 수 있나. 봇 단말이 들고 있는 알림 답장 통로가 근거다 —
+   * 그 방 카톡이 한 번 와야 열리고, 봇 앱이 죽으면 전멸한다.
+   *
+   *   open     나간다
+   *   closed   지금 쓰면 실패한다. 그 방 카톡이 한 통 와야 열린다
+   *   unknown  판단 근거가 없다(봇이 목록을 안 올리는 구버전이거나 값이 낡았다).
+   *            **경고하지 않는다** — 거짓 경보는 경보가 없느니만 못하다
+   */
+  sendState: 'open' | 'closed' | 'unknown';
 }
 
 export interface InboxMessage {
@@ -688,6 +698,20 @@ export function InboxView({ data }: { data: InboxViewData }) {
                 <div className="guard">거래처에 연결되지 않은 방이에요. 카톡방에서 #등록 을 먼저 해주세요.</div>
               ) : (
                 <>
+                  {/*
+                    쓰기 **전에** 말해준다. 여기 뜨는 방에 그냥 보내면 봇이 9초 안에 세 번
+                    시도하고 실패로 죽는다 — "보낸 줄 알았는데 안 갔다" 가 업무 카톡에서
+                    제일 나쁜 결과라 큐에 쌓이기 전에 보여준다.
+                    막지는 않는다. 통로가 방금 열렸는데 이 값이 1주기 늦은 경우가 있고,
+                    사람이 알고도 넣어두겠다면 그건 사람의 선택이다.
+                  */}
+                  {active.sendState === 'closed' ? (
+                    <div className="note warn" style={{ margin: '0 0 8px' }}>
+                      지금 이 방으로는 보낼 수 없어요 — 봇 단말이 이 방의 답장 통로를 들고 있지
+                      않습니다. <b>그 방에 카톡이 한 통 오면</b> 자동으로 열립니다. 지금 보내면
+                      몇 초 안에 실패로 처리돼요.
+                    </div>
+                  ) : null}
                   <textarea
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}

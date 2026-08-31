@@ -11,6 +11,7 @@ import {
   listRoomOutbound,
   listUnmatchedRooms,
   loadBotHeartbeat,
+  roomSendStateOf,
 } from '@/server/kakao';
 import { ConsoleShell, type HeroDef, type ViewKey } from '@/components/console/ConsoleShell';
 import { InboxView, type InboxViewData } from '@/components/console/views/InboxView';
@@ -123,6 +124,9 @@ export default async function Page() {
       lastMessageAt: r.lastMessageAt,
       preview: r.preview,
       messageCount: r.messageCount,
+      // "지금 이 방으로 글이 나갈 수 있나". 첫 렌더에도 실어야 방을 열자마자 판단이 선다 —
+      // 폴링을 기다리면 그 30초 사이에 사람이 이미 보내기를 누른다.
+      sendState: roomSendStateOf(botHeartbeat, r.rulePattern),
     })),
     messagesByRoom,
     outboundByRoom,
