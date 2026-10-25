@@ -65,6 +65,8 @@ const SEVERITY: Record<string, "low" | "med" | "high"> = {
   "admin-hidden-404": "med",
   "injection-probe": "high",
   "decoy-visit": "med",
+  "honeypot-hit": "med",
+  "canary-replay": "high",
 };
 
 // ── 스캐너 상투 경로. 밟으면 신호다(정상 사용자는 올 일 없다). ───────────
@@ -172,7 +174,10 @@ export interface SecEvent {
   referer: string; lang: string;
   // 추적ID. IP+UA+accept-language+ASN 지문을 섞은 비암호 해시 — 같은 공격자는 요청마다 같은 값.
   // 원문 IP 없이도 "같은 자가 또 왔다"를 묶어 추적한다. 수사 제출 시 Vercel 원본 로그와 대조.
-  trace: string; hint?: string;
+  trace: string;
+  // 카나리 토큰(미끼로 심은 가짜 키)이 로그인·API 입력에 되돌아왔는가. true면 "미끼 삼킨 자가 재침입" = 침입 확증.
+  canary?: boolean;
+  hint?: string;
 }
 
 // 엣지 동기 지문 해시(djb2). crypto.subtle 는 async 라 응답을 늦추므로 추적ID엔 안 쓴다.
@@ -200,28 +205,67 @@ function buildEvent(req: NextRequest, kind: string, outcome: SecEvent["outcome"]
   };
 }
 
-/** 통일 포맷 보안이벤트를 남긴다 — 콘솔 1줄(JSON) + 디스코드 즉시알림(건당). */
+// 침입 종류 한글 라벨·"무엇에 걸렸나"를 사람이 읽게. 전 서비스가 같은 말로 쓴다.
+const KIND_LABEL: Record<string, string> = {
+  "scanner-path": "스캐너 상투경로",
+  "robots-trap": "robots 미끼 적중",
+  "admin-probe": "관리자 주소 탐색",
+  "admin-geo": "관리자 경로 해외·데이터센터 접근",
+  "admin-hidden-404": "숨긴 관리자경로 미인증 접근",
+  "decoy-visit": "미끼 구역 방문",
+  "injection-probe": "주입 공격 시도",
+  "honeypot-hit": "허니팟 미끼 삼킴",
+  "canary-replay": "카나리 토큰 회수(미끼 삼킨 자가 재침입)",
+};
+// 심각도→색상(디스코드 embed 왼쪽 띠).
+const SEV_COLOR: Record<string, number> = { low: 0x9aa3b2, med: 0xb26a00, high: 0xc0362c };
+const SEV_LABEL: Record<string, string> = { low: "낮음", med: "주의", high: "위험" };
+
+/** 통일 포맷 보안이벤트를 남긴다 — 콘솔 1줄(JSON) + 디스코드 embed(건당). 전 서비스 동일 스타일. */
 export function logEvent(ev: SecEvent, event?: NextFetchEvent): void {
   // 콘솔은 Vercel 로그에 그대로 남아 사후 집계·검색이 된다. 접두로 필터링.
   console.log(`[sec] ${JSON.stringify(ev)}`);
   const url = process.env.DISCORD_SECURITY_WEBHOOK || process.env.DISCORD_WEBHOOK_URL;
   if (!url) return;
-  const scope = ev.internal ? "🏠 내부" : "🌐 외부";
-  const flag = ev.leaked ? " · ❗유출" : "";
-  const ping = ev.severity === "high" && !ev.internal ? "@here " : "";
-  const content =
-    `${ping}**🕸 ${ev.kind}** · ${scope}${flag} · ${APP} · 추적 \`${ev.trace}\`\n` +
-    `경로 \`${ev.path}\` · ${ev.method} · 지역 ${ev.country} · ASN ${ev.asn}\n` +
-    `IP \`${ev.ip}\` · UA \`${ev.ua}\`` +
-    (ev.referer && ev.referer !== "-" ? ` · ref \`${ev.referer}\`` : "") +
-    (ev.hint ? `\n힌트 \`${ev.hint}\`` : "");
+  const embed = toEmbed(ev);
+  const ping = ev.severity === "high" && !ev.internal ? "@here" : "";
   const sent = fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    // 외부 high 만 멘션을 실제로 울린다. 내부·저위험은 조용히 기록만.
-    body: JSON.stringify({ username: "침입 감시", content, allowed_mentions: { parse: ping ? ["everyone"] : [] } }),
+    body: JSON.stringify({
+      username: "침입 감시",
+      content: ping,
+      embeds: [embed],
+      allowed_mentions: { parse: ping ? ["everyone"] : [] },
+    }),
   }).catch(() => {});
   if (event) event.waitUntil(sent); else void sent;
+}
+
+/** SecEvent → 디스코드 embed. 미끼 적중·카나리 회수·내부외부·추적ID를 필드로 구조화. */
+export function toEmbed(ev: SecEvent): Record<string, unknown> {
+  const label = KIND_LABEL[ev.kind] ?? ev.kind;
+  const scope = ev.internal ? "🏠 내부" : "🌐 외부";
+  const decoyHit = ev.kind === "honeypot-hit" || ev.kind === "robots-trap" || ev.kind === "decoy-visit";
+  const canaryHit = ev.kind === "canary-replay" || ev.canary;
+  return {
+    title: `🕸 ${label}${ev.leaked ? " · ❗데이터 유출" : ""}`,
+    color: ev.leaked ? 0xc0362c : (SEV_COLOR[ev.severity] ?? 0x9aa3b2),
+    fields: [
+      { name: "서비스", value: ev.app, inline: true },
+      { name: "구분", value: `${scope} · ${SEV_LABEL[ev.severity] ?? ev.severity}`, inline: true },
+      { name: "추적ID", value: "`" + ev.trace + "`", inline: true },
+      { name: "경로", value: "`" + ev.path + "`  (" + ev.method + ")" },
+      { name: "출처", value: `IP \`${ev.ip}\` · ${ev.country} · ASN ${ev.asn}`, inline: true },
+      { name: "대응", value: ev.outcome === "blocked" ? "차단(404)" : ev.outcome === "decoy" ? "가짜응답" : "기록", inline: true },
+      { name: "미끼 적중", value: decoyHit ? "✅ 미끼에 걸림" : "—", inline: true },
+      { name: "카나리 회수", value: canaryHit ? "🚨 미끼 토큰이 되돌아옴(침입 확증)" : "—", inline: true },
+      { name: "UA", value: "`" + ev.ua + "`" },
+      ...(ev.referer && ev.referer !== "-" ? [{ name: "referer", value: "`" + ev.referer + "`" }] : []),
+      ...(ev.hint ? [{ name: "힌트", value: "`" + ev.hint + "`" }] : []),
+    ],
+    footer: { text: `${ev.ts} · 정보통신망법 48/71/72·형법 314 기록` },
+  };
 }
 
 // 기록하고 추적ID를 돌려준다 — 404 응답 헤더에 실어 "추적됨"을 남긴다.
@@ -256,6 +300,28 @@ export function hardening(req: NextRequest, event?: NextFetchEvent): NextRespons
 export function legalHeaders<T extends NextResponse>(res: T): T {
   res.headers.set("X-Legal-Notice", LEGAL);
   return res;
+}
+
+// 미끼로 심은 카나리 토큰(가짜 .env·가짜 git·허니팟 응답에 박아 둔 가짜 키). 진짜 어디에도 안 쓴다.
+// 이 값이 로그인·API 입력으로 "되돌아오면" 미끼를 삼킨 자가 그 키로 침입을 시도한 것 = 확증.
+// 앱마다 env INTRUSION_CANARY 로 접두를 바꾼다.
+const CANARY = (process.env.INTRUSION_CANARY || "app_live_sk") + "_9d2f0a7c413e86b5";
+export function canaryValue(): string { return CANARY; }
+
+/** 로그인·API 라우트에서 입력값이 미끼 토큰이면 canary-replay 로 기록(최고 심각도). 침입 확증 신호. */
+export function checkCanary(req: NextRequest, value: string | null | undefined, event?: NextFetchEvent): boolean {
+  if (!value || !value.includes(CANARY.slice(0, 20))) return false;
+  const ev = buildEvent(req, "canary-replay", "logged", false);
+  ev.canary = true;
+  logEvent(ev, event);
+  return true;
+}
+
+/** 미끼 응답을 "보여 주는" 라우트(가짜 로그인·가짜 .env)에서 적중을 기록. honeypot-hit. */
+export function reportHoneypot(req: NextRequest, event?: NextFetchEvent, hint?: string): string {
+  const ev = buildEvent(req, "honeypot-hit", "decoy", false, hint);
+  logEvent(ev, event);
+  return ev.trace;
 }
 
 // 참고용 matcher. 전 경로 매칭은 CDN 캐시를 죽이므로 함정+관리자 자리만 훑는다.
