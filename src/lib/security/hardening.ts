@@ -35,6 +35,12 @@ const SESSION_COOKIE_RE =
 const APP = process.env.INTRUSION_APP || "app";
 const LEGAL =
   "Unauthorized access prohibited and logged. Network Act 48/71/72, Criminal Act 314.";
+// 한글 법적경고. 트랩 응답 본문에 노출해 "장난이 아님"을 직접 알린다. 조문은 법제처 검증(el-tx 레퍼런스).
+const LEGAL_KO =
+  "경고: 권한 없는 접근입니다. 이 접근은 발신 정보와 함께 기록되었습니다. " +
+  "정당한 권한 없이 정보통신망에 침입하거나(정보통신망법 제48조·제71조·제72조), " +
+  "정보처리에 장애를 발생시키는 행위(형법 제314조)는 형사처벌 대상입니다. " +
+  "계속할 경우 접속 기록을 수사기관에 제출할 수 있습니다.";
 
 // 사내 대역. 여기서 온 요청은 internal 로 찍어 외부 침입과 섞이지 않게 한다.
 // 카페24 203.245.30.*, AX42 하츠너 37.27.120.36. 환경변수로 더 넣을 수 있다(쉼표구분).
@@ -117,18 +123,41 @@ function hasSession(req: NextRequest): boolean {
 const NOTFOUND_PATH = process.env.NOTFOUND_PATH || "/_not-found";
 const NOTFOUND_REWRITE = process.env.NOTFOUND_REWRITE !== "0";
 
-/** 사이트 보통 404를 그대로 그린다. 함정만 응답이 다르면 은폐가 무의미하다. */
-function notFound(req: NextRequest): NextResponse {
+/** 사이트 보통 404를 그대로 그린다. 함정만 응답이 다르면 은폐가 무의미하다.
+ *  단 법적경고·추적ID는 응답 "헤더"로만 싣는다 — 본문을 바꾸면 길이가 달라져 은폐가 깨지므로,
+ *  본문은 평범한 404 그대로 두고 X-Legal-Notice·X-Trace 헤더로 "기록·추적됨"을 알린다. */
+function notFound(req: NextRequest, trace?: string): NextResponse {
+  let res: NextResponse;
   if (NOTFOUND_REWRITE) {
     const url = req.nextUrl.clone();
     url.pathname = NOTFOUND_PATH;
     url.search = "";
-    return NextResponse.rewrite(url, { status: 404 });
+    res = NextResponse.rewrite(url, { status: 404 });
+  } else {
+    res = new NextResponse("404 Not Found", {
+      status: 404,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+    });
   }
-  return new NextResponse("404 Not Found", {
-    status: 404,
-    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+  res.headers.set("X-Legal-Notice", LEGAL);
+  res.headers.set("X-Legal-Notice-KR", encodeURIComponent(LEGAL_KO));
+  if (trace) res.headers.set("X-Trace", trace);
+  return res;
+}
+
+// 허니팟(가짜 로그인·가짜 .env 등 "응답을 보여 주는" 미끼)에는 법적경고를 본문에 직접 노출한다.
+// 여기선 은폐가 목적이 아니라 억지 — "장난 아니다"를 읽게 만든다.
+export function legalDecoy(trace: string, ctype = "text/html"): NextResponse {
+  const body = ctype.includes("html")
+    ? `<!doctype html><meta charset=utf-8><title>Access logged</title>` +
+      `<pre style="font:14px/1.6 monospace;padding:24px;white-space:pre-wrap">${LEGAL_KO}\n\n${LEGAL}\n\nTRACE-ID: ${trace}</pre>`
+    : `${LEGAL_KO}\n\n${LEGAL}\n\nTRACE-ID: ${trace}\n`;
+  const res = new NextResponse(body, {
+    status: 403,
+    headers: { "content-type": `${ctype}; charset=utf-8`, "cache-control": "no-store", "X-Trace": trace },
   });
+  res.headers.set("X-Legal-Notice", LEGAL);
+  return res;
 }
 
 /** 기록은 응답을 붙잡지 않는다. waitUntil로 "응답 먼저, 기록은 끝까지". */
@@ -137,19 +166,36 @@ function notFound(req: NextRequest): NextResponse {
 //   실제 유출은 미들웨어가 아니라 각 앱 라우트가 판단해 logEvent(...,{leaked:true})로 남긴다.
 export interface SecEvent {
   app: string; kind: string; ts: string;
-  ip: string; country: string; internal: boolean;
+  ip: string; country: string; asn: string; internal: boolean;
   outcome: "blocked" | "decoy" | "logged"; leaked: boolean;
-  severity: "low" | "med" | "high"; path: string; method: string; ua: string; hint?: string;
+  severity: "low" | "med" | "high"; path: string; method: string; ua: string;
+  referer: string; lang: string;
+  // 추적ID. IP+UA+accept-language+ASN 지문을 섞은 비암호 해시 — 같은 공격자는 요청마다 같은 값.
+  // 원문 IP 없이도 "같은 자가 또 왔다"를 묶어 추적한다. 수사 제출 시 Vercel 원본 로그와 대조.
+  trace: string; hint?: string;
+}
+
+// 엣지 동기 지문 해시(djb2). crypto.subtle 는 async 라 응답을 늦추므로 추적ID엔 안 쓴다.
+function traceId(parts: string[]): string {
+  let h = 5381;
+  const s = parts.join("|");
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return (h.toString(16).padStart(8, "0") + APP.slice(0, 3)).toUpperCase();
 }
 
 function buildEvent(req: NextRequest, kind: string, outcome: SecEvent["outcome"], leaked: boolean, hint?: string): SecEvent {
   const h = req.headers;
   const ipRaw = (h.get("x-real-ip") || h.get("x-forwarded-for") || "").split(",")[0]?.trim() ?? "";
+  const ua = (h.get("user-agent") || "-");
+  const lang = h.get("accept-language") || "-";
+  const asn = h.get("x-vercel-ip-asn") || "-";
   return {
     app: APP, kind, ts: new Date().toISOString(),
-    ip: maskIp(ipRaw), country: h.get("x-vercel-ip-country") || "?", internal: isInternalIp(ipRaw),
+    ip: maskIp(ipRaw), country: h.get("x-vercel-ip-country") || "?", asn, internal: isInternalIp(ipRaw),
     outcome, leaked, severity: SEVERITY[kind] ?? "low",
-    path: req.nextUrl.pathname.slice(0, 200), method: req.method, ua: (h.get("user-agent") || "-").slice(0, 120),
+    path: req.nextUrl.pathname.slice(0, 200), method: req.method, ua: ua.slice(0, 120),
+    referer: (h.get("referer") || "-").slice(0, 120), lang: lang.slice(0, 40),
+    trace: traceId([ipRaw, ua, lang, asn]),
     ...(hint ? { hint } : {}),
   };
 }
@@ -164,8 +210,10 @@ export function logEvent(ev: SecEvent, event?: NextFetchEvent): void {
   const flag = ev.leaked ? " · ❗유출" : "";
   const ping = ev.severity === "high" && !ev.internal ? "@here " : "";
   const content =
-    `${ping}**🕸 ${ev.kind}** · ${scope}${flag} · ${APP}\n` +
-    `경로 \`${ev.path}\` · ${ev.method} · 지역 ${ev.country}\nIP \`${ev.ip}\` · UA \`${ev.ua}\`` +
+    `${ping}**🕸 ${ev.kind}** · ${scope}${flag} · ${APP} · 추적 \`${ev.trace}\`\n` +
+    `경로 \`${ev.path}\` · ${ev.method} · 지역 ${ev.country} · ASN ${ev.asn}\n` +
+    `IP \`${ev.ip}\` · UA \`${ev.ua}\`` +
+    (ev.referer && ev.referer !== "-" ? ` · ref \`${ev.referer}\`` : "") +
     (ev.hint ? `\n힌트 \`${ev.hint}\`` : "");
   const sent = fetch(url, {
     method: "POST",
@@ -176,20 +224,23 @@ export function logEvent(ev: SecEvent, event?: NextFetchEvent): void {
   if (event) event.waitUntil(sent); else void sent;
 }
 
-function report(req: NextRequest, kind: string, event?: NextFetchEvent, hint?: string): void {
+// 기록하고 추적ID를 돌려준다 — 404 응답 헤더에 실어 "추적됨"을 남긴다.
+function report(req: NextRequest, kind: string, event?: NextFetchEvent, hint?: string): string {
   const outcome: SecEvent["outcome"] = kind === "decoy-visit" ? "logged" : "blocked";
-  logEvent(buildEvent(req, kind, outcome, false, hint), event);
+  const ev = buildEvent(req, kind, outcome, false, hint);
+  logEvent(ev, event);
+  return ev.trace;
 }
 
 /** 숨김/함정이면 404 NextResponse, 아니면 null(기존 로직으로 흘려보냄). */
 export function hardening(req: NextRequest, event?: NextFetchEvent): NextResponse | null {
   const { pathname } = req.nextUrl;
 
-  if (anyMatch(SCANNER_RE, pathname)) { report(req, "scanner-path", event); return notFound(req); }
+  if (anyMatch(SCANNER_RE, pathname)) return notFound(req, report(req, "scanner-path", event));
   if (ROBOTS_TRAPS.some((t) => pathname === t || pathname.startsWith(t + "/"))) {
-    report(req, "robots-trap", event); return notFound(req);
+    return notFound(req, report(req, "robots-trap", event));
   }
-  if (anyMatch(ADMIN_PROBE_RE, pathname)) { report(req, "admin-probe", event); return notFound(req); }
+  if (anyMatch(ADMIN_PROBE_RE, pathname)) return notFound(req, report(req, "admin-probe", event));
 
   // 진짜 관리자 경로 은폐: 세션쿠키 없으면 404. 있으면 통과(권한확인은 앱이 맡음).
   const isAdmin = ADMIN_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"));
@@ -197,7 +248,7 @@ export function hardening(req: NextRequest, event?: NextFetchEvent): NextRespons
     const country = req.headers.get("x-vercel-ip-country");
     const asn = req.headers.get("x-vercel-ip-asn");
     if ((country && country !== "KR") || (asn && DATACENTER_ASNS.has(asn))) report(req, "admin-geo", event);
-    if (!hasSession(req)) { report(req, "admin-hidden-404", event); return notFound(req); }
+    if (!hasSession(req)) return notFound(req, report(req, "admin-hidden-404", event));
   }
   return null;
 }
